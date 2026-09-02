@@ -1,6 +1,6 @@
 //@name autopilot
 //@api 3.0
-//@version 1.3.0
+//@version 1.7.0
 //@display-name Autopilot
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/Autopilot.js
 
@@ -15,38 +15,62 @@
 
   const PLUGIN_NAME = 'Autopilot';
   const DEFAULT_MESSAGE = '*says nothing*';
+  const DEFAULT_INSTRUCTIONS = [
+    '마지막 캐릭터 응답에 자연스럽게 이어지는 사용자의 다음 메시지를 작성하세요.',
+    '사용자의 말과 행동만 작성하고 캐릭터의 말이나 행동을 대신 작성하지 마세요.',
+  ].join('\n');
   const STORAGE_KEY = 'risu-autopilot:settings:v1';
   const CHAT_BUTTON_ID = 'risu-autopilot-chat-button';
+  const MODE_FIXED = 'fixed';
+  const MODE_GENERATED = 'generated';
   const MIN_TURNS = 1;
   const MAX_TURNS = 100;
   const DEFAULT_TURNS = 10;
+  const MIN_CONTEXT_MESSAGES = 1;
+  const MAX_CONTEXT_MESSAGES = 10;
+  const DEFAULT_CONTEXT_MESSAGES = 6;
   const COOLDOWN_MS = 800;
 
   const state = {
     running: false,
     stopRequested: false,
     sessionToken: 0,
+    mode: MODE_FIXED,
     targetTurns: DEFAULT_TURNS,
     message: DEFAULT_MESSAGE,
+    instructions: DEFAULT_INSTRUCTIONS,
+    contextMessageLimit: DEFAULT_CONTEXT_MESSAGES,
+    includePersona: false,
+    personaContext: null,
+    generatedMessage: '',
     completedTurns: 0,
     phase: 'idle',
-    status: '자동 진행할 턴 수를 설정해 주세요.',
+    status: '자동 진행 모드와 턴 수를 설정해 주세요.',
     error: '',
     activeCharacterIndex: null,
     activeChatIndex: null,
     activeCharacterName: '',
     activeChatName: '',
+    generatedReady: false,
+    generatedBlockReason: '현재 채팅을 확인하는 중입니다.',
     panelPosition: null,
     chatButtonPart: null,
     eventsBound: false,
   };
 
   let dragSession = null;
+  let settingsSaveTimer = null;
 
   function clampTurnCount(value) {
     const number = Number.parseInt(String(value), 10);
     if (!Number.isFinite(number)) return DEFAULT_TURNS;
     return Math.min(MAX_TURNS, Math.max(MIN_TURNS, number));
+  }
+
+  function clampContextMessageCount(value) {
+    const number = Number.parseInt(String(value), 10);
+    if (!Number.isFinite(number)) return DEFAULT_CONTEXT_MESSAGES;
+    return Math.min(MAX_CONTEXT_MESSAGES, Math.max(MIN_CONTEXT_MESSAGES, number));
   }
 
   function errorMessage(error) {
@@ -90,6 +114,74 @@
     return `${index}|${generationId}|${time}|${String(message?.data || '')}`;
   }
 
+  function conversationSignature(chat) {
+    return JSON.stringify({
+      bindedPersona: chat?.bindedPersona ?? '',
+      messages: messagesOf(chat).map((message) => [
+        message?.role || '',
+        String(message?.data || ''),
+        message?.time ?? null,
+        generationIdOf(message),
+        message?.disabled ?? false,
+        message?.isComment === true,
+      ]),
+    });
+  }
+
+  function isRelevantConversationMessage(message) {
+    return (message?.role === 'user' || message?.role === 'char')
+      && message?.isComment !== true
+      && message?.disabled !== true;
+  }
+
+  function generatedModeSource(chat) {
+    const relevant = messagesOf(chat)
+      .map((message, index) => ({ message, index }))
+      .filter(({ message }) => isRelevantConversationMessage(message));
+
+    const characterMessages = relevant.filter(({ message }) => isCharacterMessage(message));
+    if (characterMessages.length === 0) {
+      return {
+        ok: false,
+        reason: '첫 메시지를 제외한 실제 캐릭터 응답이 최소 1개 필요합니다.',
+      };
+    }
+
+    const latest = relevant.at(-1);
+    if (!latest || !isCharacterMessage(latest.message)) {
+      return {
+        ok: false,
+        reason: '마지막 유효 메시지가 캐릭터 응답일 때만 시작할 수 있습니다.',
+      };
+    }
+    if (containsRisuError(latest.message)) {
+      return {
+        ok: false,
+        reason: '마지막 캐릭터 메시지가 RisuAI 오류 응답입니다.',
+      };
+    }
+    if (!String(latest.message?.data || '').trim()) {
+      return {
+        ok: false,
+        reason: '마지막 캐릭터 응답이 비어 있습니다.',
+      };
+    }
+
+    return {
+      ok: true,
+      message: latest.message,
+      index: latest.index,
+      identity: messageIdentity(latest.message, latest.index),
+    };
+  }
+
+  function updateGeneratedEligibility(chat) {
+    const source = generatedModeSource(chat);
+    state.generatedReady = source.ok === true;
+    state.generatedBlockReason = source.ok ? '' : source.reason;
+    return source;
+  }
+
   function snapshotChat(chat) {
     const messages = messagesOf(chat);
     return {
@@ -130,15 +222,40 @@
     });
   }
 
+  function syncFormStateFromDOM() {
+    const turnInput = document.getElementById('autopilot-turns');
+    const messageInput = document.getElementById('autopilot-message');
+    const instructionsInput = document.getElementById('autopilot-instructions');
+    const contextMessagesInput = document.getElementById('autopilot-context-messages');
+    const includePersonaInput = document.getElementById('autopilot-include-persona');
+    if (turnInput) state.targetTurns = clampTurnCount(turnInput.value);
+    if (messageInput) state.message = String(messageInput.value ?? state.message);
+    if (instructionsInput) {
+      state.instructions = String(instructionsInput.value ?? state.instructions);
+    }
+    if (contextMessagesInput) {
+      state.contextMessageLimit = clampContextMessageCount(contextMessagesInput.value);
+    }
+    if (includePersonaInput) {
+      state.includePersona = includePersonaInput.checked === true;
+    }
+  }
+
   async function loadSettings() {
     try {
       const raw = await api.pluginStorage.getItem(STORAGE_KEY);
       if (!raw) return;
       const parsed = JSON.parse(raw);
       state.targetTurns = clampTurnCount(parsed?.turns);
+      state.contextMessageLimit = clampContextMessageCount(parsed?.contextMessages);
+      state.mode = parsed?.mode === MODE_GENERATED ? MODE_GENERATED : MODE_FIXED;
       if (typeof parsed?.message === 'string' && parsed.message.trim()) {
         state.message = parsed.message;
       }
+      if (typeof parsed?.instructions === 'string') {
+        state.instructions = parsed.instructions;
+      }
+      state.includePersona = parsed?.includePersona === true;
     } catch (error) {
       console.warn('[Autopilot] 설정을 불러오지 못했습니다.', error);
     }
@@ -148,11 +265,38 @@
     try {
       await api.pluginStorage.setItem(STORAGE_KEY, JSON.stringify({
         turns: state.targetTurns,
+        mode: state.mode,
         message: state.message,
+        instructions: state.instructions,
+        contextMessages: state.contextMessageLimit,
+        includePersona: state.includePersona,
       }));
     } catch (error) {
       console.warn('[Autopilot] 설정을 저장하지 못했습니다.', error);
     }
+  }
+
+  function scheduleSettingsSave() {
+    syncFormStateFromDOM();
+    if (settingsSaveTimer !== null) clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = setTimeout(() => {
+      settingsSaveTimer = null;
+      void saveSettings();
+    }, 300);
+  }
+
+  async function flushSettingsSave() {
+    syncFormStateFromDOM();
+    if (settingsSaveTimer !== null) {
+      clearTimeout(settingsSaveTimer);
+      settingsSaveTimer = null;
+    }
+    await saveSettings();
+  }
+
+  async function closeUI() {
+    await flushSettingsSave();
+    await api.hideContainer();
   }
 
   function installStyle() {
@@ -164,7 +308,26 @@
         font-family: Inter, Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         background-color: transparent !important;
       }
-      * { box-sizing: border-box; }
+      * {
+        box-sizing: border-box;
+        scrollbar-width: thin;
+        scrollbar-color: #8064d6 rgba(255, 255, 255, .045);
+      }
+      *::-webkit-scrollbar { width: 10px; height: 10px; }
+      *::-webkit-scrollbar-track {
+        border-radius: 999px;
+        background: rgba(255, 255, 255, .035);
+      }
+      *::-webkit-scrollbar-thumb {
+        min-height: 34px;
+        border: 2px solid transparent;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #9678f0, #6650b9) padding-box;
+      }
+      *::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(180deg, #aa91ff, #7960d4) padding-box;
+      }
+      *::-webkit-scrollbar-corner { background: transparent; }
       html, body {
         width: 100%;
         min-height: 100%;
@@ -189,13 +352,14 @@
         position: fixed;
         top: 50%;
         left: 50%;
-        transform: translate(-50%, -50%);
-        width: min(520px, 100%);
+        width: min(560px, 100%);
+        max-height: calc(100vh - 32px);
         border: 1px solid rgba(255, 255, 255, .12);
         border-radius: 24px;
+        overflow: hidden;
         background: #181426;
         box-shadow: 0 24px 80px rgba(0, 0, 0, .42);
-        overflow: hidden;
+        transform: translate(-50%, -50%);
       }
       .header {
         display: flex;
@@ -225,19 +389,23 @@
         color: #eee8ff;
         background: rgba(255, 255, 255, .06);
       }
-      .content { padding: 8px 24px 24px; }
+      .content {
+        max-height: calc(100vh - 102px);
+        padding: 8px 24px 24px;
+        overflow-y: auto;
+      }
       .context {
         display: grid;
         grid-template-columns: 1fr 1fr;
         gap: 10px;
-        margin-bottom: 18px;
+        margin-bottom: 16px;
       }
-      .context-card, .message-card, .status-card {
+      .context-card, .message-card, .status-card, .availability {
         border: 1px solid rgba(255, 255, 255, .09);
         border-radius: 16px;
         background: rgba(255, 255, 255, .045);
       }
-      .context-card { padding: 12px 14px; min-width: 0; }
+      .context-card { min-width: 0; padding: 12px 14px; }
       .label {
         display: block;
         margin-bottom: 5px;
@@ -254,6 +422,56 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .tabs {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        margin-bottom: 18px;
+        padding: 5px;
+        border: 1px solid rgba(255, 255, 255, .09);
+        border-radius: 15px;
+        background: rgba(7, 6, 12, .38);
+      }
+      .tab {
+        min-height: 42px;
+        border: 0;
+        border-radius: 11px;
+        color: #9f97b1;
+        background: transparent;
+        font-weight: 800;
+      }
+      .tab.active {
+        color: #f7f3ff;
+        background: rgba(140, 104, 255, .2);
+        box-shadow: inset 0 0 0 1px rgba(180, 158, 255, .15);
+      }
+      .phase-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .phase-badge, .mode-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .phase-badge { color: #d9ceff; background: rgba(140, 104, 255, .14); }
+      .mode-badge { color: #b9e9ed; background: rgba(80, 206, 216, .11); }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #9c7cff;
+        box-shadow: 0 0 0 4px rgba(156, 124, 255, .12);
+      }
+      .running .dot { animation: pulse 1.15s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: .35; transform: scale(.72); } }
       .message-card { margin-bottom: 18px; padding: 14px 16px; }
       code {
         color: #d8ccff;
@@ -282,20 +500,108 @@
         color: #fff;
         background: rgba(7, 6, 12, .5);
       }
-      input[type="number"] {
-        height: 50px;
-        padding: 0 15px;
-      }
+      input[type="number"] { height: 50px; padding: 0 15px; }
       textarea {
         min-height: 104px;
         padding: 13px 15px;
         line-height: 1.5;
         resize: vertical;
       }
+      #autopilot-instructions { min-height: 150px; }
       input[type="number"]:focus, textarea:focus {
         border-color: #9d7cff;
         box-shadow: 0 0 0 3px rgba(157, 124, 255, .14);
       }
+      .settings-fold {
+        margin: 0 0 16px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, .1);
+        border-radius: 16px;
+        background: rgba(255, 255, 255, .035);
+      }
+      .settings-fold summary {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        min-height: 62px;
+        padding: 12px 14px;
+        color: #f2edff;
+        cursor: pointer;
+        list-style: none;
+        user-select: none;
+      }
+      .settings-fold summary::-webkit-details-marker { display: none; }
+      .settings-fold summary:hover { background: rgba(157, 124, 255, .07); }
+      .settings-fold summary:focus-visible {
+        outline: 2px solid #9d7cff;
+        outline-offset: -2px;
+      }
+      .settings-fold[open] summary {
+        border-bottom: 1px solid rgba(255, 255, 255, .08);
+        background: rgba(157, 124, 255, .055);
+      }
+      .settings-fold-copy { display: grid; gap: 3px; min-width: 0; }
+      .settings-fold-title { font-size: 14px; font-weight: 850; }
+      .settings-fold-description {
+        overflow: hidden;
+        color: #9f97b1;
+        font-size: 12px;
+        font-weight: 500;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .settings-fold-chevron {
+        flex: 0 0 auto;
+        color: #bdaaff;
+        font-size: 20px;
+        line-height: 1;
+        transition: transform .18s ease;
+      }
+      .settings-fold[open] .settings-fold-chevron { transform: rotate(180deg); }
+      .settings-fold-body { padding: 16px 14px 0; }
+      .option-card {
+        display: flex;
+        align-items: flex-start;
+        gap: 11px;
+        margin: 0 0 16px;
+        padding: 13px 14px;
+        border: 1px solid rgba(255, 255, 255, .1);
+        border-radius: 15px;
+        background: rgba(255, 255, 255, .035);
+        cursor: pointer;
+      }
+      .option-card input {
+        flex: 0 0 auto;
+        width: 18px;
+        height: 18px;
+        margin: 2px 0 0;
+        accent-color: #8f6cff;
+      }
+      .option-copy { display: grid; gap: 3px; }
+      .option-title { color: #f2edff; font-size: 14px; font-weight: 800; }
+      .option-description { color: #9f97b1; font-size: 12px; font-weight: 500; line-height: 1.45; }
+      .availability {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        margin-bottom: 16px;
+        padding: 12px 14px;
+        color: #c9c2d7;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .availability.good {
+        border-color: rgba(80, 206, 216, .2);
+        color: #d2f6f8;
+        background: rgba(30, 112, 119, .14);
+      }
+      .availability.blocked {
+        border-color: rgba(255, 190, 88, .22);
+        color: #ffe7bd;
+        background: rgba(132, 84, 22, .17);
+      }
+      .availability-icon { flex: 0 0 auto; font-weight: 900; }
       .notice {
         margin: 0 0 18px;
         color: #aaa1bc;
@@ -339,7 +645,6 @@
         white-space: pre-wrap;
       }
       .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-      .actions.single { grid-template-columns: 1fr; }
       .button {
         min-height: 48px;
         padding: 0 16px;
@@ -363,40 +668,19 @@
         background: rgba(146, 39, 61, .24);
       }
       .button:disabled { cursor: not-allowed; opacity: .48; }
-      .phase-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 7px;
-        margin-bottom: 14px;
-        padding: 6px 10px;
-        border-radius: 999px;
-        color: #d9ceff;
-        background: rgba(140, 104, 255, .14);
-        font-size: 12px;
-        font-weight: 800;
-      }
-      .dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: #9c7cff;
-        box-shadow: 0 0 0 4px rgba(156, 124, 255, .12);
-      }
-      .running .dot { animation: pulse 1.15s ease-in-out infinite; }
-      @keyframes pulse { 50% { opacity: .35; transform: scale(.72); } }
       @media (max-width: 520px) {
         .app { padding: 0; place-items: stretch; }
         .panel {
           position: relative;
           top: auto;
           left: auto;
+          max-height: none;
           min-height: 100vh;
           border-radius: 0;
           transform: none;
         }
-        .header { cursor: default; }
-        .header { padding: 20px 18px 14px; }
-        .content { padding: 8px 18px 22px; }
+        .header { padding: 20px 18px 14px; cursor: default; }
+        .content { max-height: none; padding: 8px 18px 22px; }
         .context { grid-template-columns: 1fr; }
       }
     `;
@@ -406,6 +690,7 @@
   function phaseLabel() {
     switch (state.phase) {
       case 'permission': return '권한 확인 중';
+      case 'generating': return '사용자 응답 생성 중';
       case 'sending': return '응답 및 후처리 대기 중';
       case 'cooldown': return '다음 턴 준비 중';
       case 'stopping': return '중지 대기 중';
@@ -478,6 +763,106 @@
     document.querySelector('.panel')?.classList.remove('dragging');
   }
 
+  function renderProgress(progress) {
+    return `
+      <div class="status-card">
+        <div class="status-line">
+          <span class="status-text">${escapeHTML(state.status)}</span>
+          <span class="counter">${state.completedTurns} / ${state.targetTurns}</span>
+        </div>
+        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}">
+          <span style="--progress: ${progress}%"></span>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderIdleSettings(progress) {
+    const generatedMode = state.mode === MODE_GENERATED;
+    const generatedDisabled = generatedMode && !state.generatedReady;
+    return `
+      <div class="tabs" role="tablist" aria-label="자동 진행 모드">
+        <button class="tab${generatedMode ? '' : ' active'}" type="button" role="tab"
+          aria-selected="${generatedMode ? 'false' : 'true'}" data-action="select-mode" data-mode="${MODE_FIXED}">
+          고정 메시지
+        </button>
+        <button class="tab${generatedMode ? ' active' : ''}" type="button" role="tab"
+          aria-selected="${generatedMode ? 'true' : 'false'}" data-action="select-mode" data-mode="${MODE_GENERATED}">
+          AI 자동 응답
+        </button>
+      </div>
+
+      ${generatedMode ? `
+        <details class="settings-fold">
+          <summary>
+            <span class="settings-fold-copy">
+              <span class="settings-fold-title">응답 생성 설정</span>
+              <span class="settings-fold-description">작성 지침 · 대화 컨텍스트 · 사용자 페르소나</span>
+            </span>
+            <span class="settings-fold-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <div class="settings-fold-body">
+            <div class="field">
+              <label for="autopilot-instructions">
+                작성 지침 프롬프트
+                <span class="hint">보조모델에 매 턴 적용</span>
+              </label>
+              <textarea id="autopilot-instructions" spellcheck="true">${escapeHTML(state.instructions)}</textarea>
+            </div>
+            <div class="field">
+              <label for="autopilot-context-messages">
+                전달할 최근 메시지 수
+                <span class="hint">${MIN_CONTEXT_MESSAGES}–${MAX_CONTEXT_MESSAGES}개 · 기본 ${DEFAULT_CONTEXT_MESSAGES}개</span>
+              </label>
+              <input id="autopilot-context-messages" type="number" min="${MIN_CONTEXT_MESSAGES}" max="${MAX_CONTEXT_MESSAGES}" step="1" value="${state.contextMessageLimit}">
+            </div>
+            <label class="option-card" for="autopilot-include-persona">
+              <input id="autopilot-include-persona" type="checkbox" ${state.includePersona ? 'checked' : ''}>
+              <span class="option-copy">
+                <span class="option-title">페르소나 정보 포함</span>
+                <span class="option-description">채팅에 바인드되거나 현재 선택된 페르소나 정보를 보조모델에 전달합니다.</span>
+              </span>
+            </label>
+          </div>
+        </details>
+        <div class="availability ${state.generatedReady ? 'good' : 'blocked'}">
+          <span class="availability-icon">${state.generatedReady ? '✓' : '!'}</span>
+          <span>${escapeHTML(state.generatedReady
+            ? '마지막 실제 메시지가 캐릭터 응답입니다. AI 자동 응답을 시작할 수 있습니다.'
+            : state.generatedBlockReason)}</span>
+        </div>
+      ` : `
+        <div class="field">
+          <label for="autopilot-message">
+            전송 메시지
+            <span class="hint">매 턴 동일하게 전송</span>
+          </label>
+          <textarea id="autopilot-message" spellcheck="true">${escapeHTML(state.message)}</textarea>
+        </div>
+      `}
+
+      <div class="field">
+        <label for="autopilot-turns">
+          자동 진행 턴 수
+          <span class="hint">${MIN_TURNS}–${MAX_TURNS}턴</span>
+        </label>
+        <input id="autopilot-turns" type="number" min="${MIN_TURNS}" max="${MAX_TURNS}" step="1" value="${state.targetTurns}">
+      </div>
+
+      <p class="notice">${generatedMode
+        ? '각 턴마다 RisuAI의 기타 보조모델이 최근 실제 대화와 마지막 캐릭터 응답을 바탕으로 사용자 메시지를 작성합니다. 첫 메시지만 있는 새 채팅에서는 시작할 수 없습니다.'
+        : '1턴은 메시지 1회 전송과 AI 응답의 전체 후처리 완료까지입니다. 오류 응답이나 응답 누락이 확인되면 즉시 중단됩니다.'}</p>
+      ${state.error ? `<div class="error-box" role="alert">${escapeHTML(state.error)}</div>` : ''}
+      ${state.phase === 'completed' || state.phase === 'stopped' ? renderProgress(progress) : ''}
+      <div class="actions">
+        <button class="button primary" type="button" data-action="start" ${generatedDisabled ? 'disabled' : ''}>
+          ${generatedMode ? 'AI 자동 응답 시작' : '자동 진행 시작'}
+        </button>
+        <button class="button secondary" type="button" data-action="close">취소</button>
+      </div>
+    `;
+  }
+
   function render() {
     installStyle();
     const progress = state.targetTurns > 0
@@ -486,6 +871,8 @@
     const runningClass = state.running ? ' running' : '';
     const characterName = state.activeCharacterName || '현재 캐릭터';
     const chatName = state.activeChatName || '현재 채팅';
+    const generatedMode = state.mode === MODE_GENERATED;
+    const displayedMessage = generatedMode ? state.generatedMessage : state.message;
 
     document.body.innerHTML = `
       <main class="app${runningClass}">
@@ -498,7 +885,10 @@
             <button class="icon-button" type="button" data-action="close" aria-label="화면 닫기">✕</button>
           </header>
           <div class="content">
-            <div class="phase-badge"><span class="dot"></span>${escapeHTML(phaseLabel())}</div>
+            <div class="phase-row">
+              <div class="phase-badge"><span class="dot"></span>${escapeHTML(phaseLabel())}</div>
+              ${state.running ? `<div class="mode-badge">${generatedMode ? 'AI 자동 응답' : '고정 메시지'}</div>` : ''}
+            </div>
 
             <div class="context">
               <div class="context-card">
@@ -513,58 +903,18 @@
 
             ${state.running ? `
               <div class="message-card">
-                <span class="label">전송 메시지</span>
-                <code>${escapeHTML(state.message)}</code>
+                <span class="label">${generatedMode ? '최근 생성된 전송 메시지' : '전송 메시지'}</span>
+                <code>${escapeHTML(displayedMessage || '보조모델 응답을 생성하는 중입니다.')}</code>
               </div>
-              <div class="status-card">
-                <div class="status-line">
-                  <span class="status-text">${escapeHTML(state.status)}</span>
-                  <span class="counter">${state.completedTurns} / ${state.targetTurns}</span>
-                </div>
-                <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}">
-                  <span style="--progress: ${progress}%"></span>
-                </div>
-              </div>
-              <p class="notice">중지를 눌러도 생성 중인 응답은 강제로 취소하지 않습니다. 현재 응답의 후처리가 끝난 뒤 다음 전송을 막습니다.</p>
+              ${renderProgress(progress)}
+              <p class="notice">중지를 눌러도 진행 중인 보조모델 또는 메인모델 호출은 강제로 취소하지 않습니다. 현재 호출이 끝난 뒤 다음 전송을 막습니다.</p>
               <div class="actions">
                 <button class="button danger" type="button" data-action="stop" ${state.stopRequested ? 'disabled' : ''}>
                   ${state.stopRequested ? '중지 대기 중' : '자동 진행 중지'}
                 </button>
                 <button class="button secondary" type="button" data-action="close">채팅 보기</button>
               </div>
-            ` : `
-              <div class="field">
-                <label for="autopilot-message">
-                  전송 메시지
-                  <span class="hint">매 턴 동일하게 전송</span>
-                </label>
-                <textarea id="autopilot-message" spellcheck="true">${escapeHTML(state.message)}</textarea>
-              </div>
-              <div class="field">
-                <label for="autopilot-turns">
-                  자동 진행 턴 수
-                  <span class="hint">${MIN_TURNS}–${MAX_TURNS}턴</span>
-                </label>
-                <input id="autopilot-turns" type="number" min="${MIN_TURNS}" max="${MAX_TURNS}" step="1" value="${state.targetTurns}">
-              </div>
-              <p class="notice">1턴은 메시지 1회 전송과 AI 응답의 전체 후처리 완료까지입니다. 오류 응답이나 응답 누락이 확인되면 즉시 중단됩니다.</p>
-              ${state.error ? `<div class="error-box" role="alert">${escapeHTML(state.error)}</div>` : ''}
-              ${state.phase === 'completed' || state.phase === 'stopped' ? `
-                <div class="status-card">
-                  <div class="status-line">
-                    <span class="status-text">${escapeHTML(state.status)}</span>
-                    <span class="counter">${state.completedTurns} / ${state.targetTurns}</span>
-                  </div>
-                  <div class="progress">
-                    <span style="--progress: ${progress}%"></span>
-                  </div>
-                </div>
-              ` : ''}
-              <div class="actions">
-                <button class="button primary" type="button" data-action="start">자동 진행 시작</button>
-                <button class="button secondary" type="button" data-action="close">취소</button>
-              </div>
-            `}
+            ` : renderIdleSettings(progress)}
           </div>
         </section>
       </main>
@@ -584,10 +934,15 @@
       state.activeCharacterName = String(character?.name || '이름 없는 캐릭터');
       const chat = await api.getChatFromIndex(characterIndex, chatIndex);
       state.activeChatName = String(chat?.name || `채팅 ${Number(chatIndex) + 1}`);
+      updateGeneratedEligibility(chat);
+      return chat;
     } catch (error) {
       state.activeCharacterName = '캐릭터 확인 실패';
       state.activeChatName = '채팅 확인 실패';
+      state.generatedReady = false;
+      state.generatedBlockReason = '현재 채팅 정보를 읽지 못했습니다.';
       console.warn('[Autopilot] 현재 채팅 정보를 읽지 못했습니다.', error);
+      return null;
     }
   }
 
@@ -677,6 +1032,126 @@
     render();
   }
 
+  async function resolvePersonaContext(chat) {
+    if (!state.includePersona) return null;
+    if (typeof api.getDatabase !== 'function') {
+      throw new Error('현재 RisuAI 버전에는 플러그인 getDatabase API가 없습니다.');
+    }
+
+    const permission = await api.requestPluginPermission('db');
+    if (permission !== true) {
+      throw new Error('페르소나 정보를 읽기 위한 DB 권한이 허용되지 않았습니다.');
+    }
+
+    const database = await api.getDatabase(['personas', 'selectedPersona']);
+    if (!database) {
+      throw new Error('RisuAI 데이터베이스에서 페르소나 정보를 읽지 못했습니다.');
+    }
+
+    const personas = Array.isArray(database.personas) ? database.personas : [];
+    let persona = null;
+    const bindedPersonaId = String(chat?.bindedPersona || '');
+
+    if (bindedPersonaId) {
+      persona = personas.find((item) => String(item?.id || '') === bindedPersonaId) || null;
+    }
+
+    if (!persona) {
+      const selectedIndex = Number.parseInt(String(database.selectedPersona), 10);
+      if (Number.isInteger(selectedIndex) && selectedIndex >= 0) {
+        persona = personas[selectedIndex] || null;
+      }
+    }
+
+    if (!persona) {
+      throw new Error('채팅에 바인드되었거나 현재 선택된 페르소나를 찾지 못했습니다.');
+    }
+
+    return {
+      personaPrompt: String(persona?.personaPrompt || ''),
+    };
+  }
+
+  function buildGenerationMessages(chat, source) {
+    const recentMessages = messagesOf(chat)
+      .map((message, index) => ({ message, index }))
+      .filter(({ message, index }) => index <= source.index && isRelevantConversationMessage(message))
+      .slice(-clampContextMessageCount(state.contextMessageLimit))
+      .map(({ message }) => ({
+        role: message.role === 'char' ? 'character' : 'user',
+        speaker: String(message?.name || (
+          message.role === 'char' ? state.activeCharacterName || '캐릭터' : '사용자'
+        )),
+        content: String(message?.data || ''),
+      }));
+
+    const instructions = state.instructions.trim() || DEFAULT_INSTRUCTIONS;
+    const personaInformation = state.includePersona && state.personaContext
+      ? [
+        'The <persona_json> below is the user\'s persona.',
+        'Refer to it when adopting the user\'s identity, personality, and tone in the current chat.',
+        'If the persona information conflicts with other output rules, prioritize the output rules.',
+        '<persona_json>',
+        JSON.stringify(state.personaContext, null, 2),
+        '</persona_json>',
+      ].join('\n')
+      : '';
+    return [
+      {
+        role: 'system',
+        content: [
+          'You are an assistant writer who writes the user\'s next message in an AI roleplay chat.',
+          'The output must be solely a single user message body to be sent directly to the actual chat.',
+          'Do not output explanations, analyses, prefaces, candidate lists, or code fences.',
+          'Respond in the primary language used in the current chat.',
+          personaInformation,
+          `Writing Instructions:\n${instructions}`,
+        ].filter(Boolean).join('\n\n'),
+      },
+      {
+        role: 'user',
+        content: [
+          'Write a user message that naturally follows the last character message in the following conversation.',
+          '<conversation_json>',
+          JSON.stringify(recentMessages, null, 2),
+          '</conversation_json>',
+        ].join('\n'),
+      },
+    ];
+  }
+
+  function generatedTextFromResult(result) {
+    if (result?.type === 'fail') {
+      throw new Error(String(result.result || '보조모델 요청이 실패했습니다.'));
+    }
+    if (result?.type && result.type !== 'success') {
+      throw new Error(`지원하지 않는 보조모델 응답 형식입니다: ${String(result.type)}`);
+    }
+
+    let text = '';
+    if (typeof result === 'string') text = result;
+    else if (typeof result?.result === 'string') text = result.result;
+
+    text = text
+      .replace(/^\s*<Thoughts>[\s\S]*?<\/Thoughts>\s*/i, '')
+      .trim();
+
+    if (!text) throw new Error('보조모델이 빈 메시지를 반환했습니다.');
+    if (/```risuerror(?:\s|$)/i.test(text)) {
+      throw new Error(`보조모델이 RisuAI 오류 응답을 반환했습니다.\n${text}`);
+    }
+    return text;
+  }
+
+  async function generateNextUserMessage(chat, source) {
+    const result = await api.runLLMModel({
+      messages: buildGenerationMessages(chat, source),
+      mode: 'otherAx',
+      allowPlugins: true,
+    });
+    return generatedTextFromResult(result);
+  }
+
   async function runAutopilot(token) {
     while (state.completedTurns < state.targetTurns) {
       if (token !== state.sessionToken) return;
@@ -712,6 +1187,85 @@
         return;
       }
 
+      let outgoingMessage = state.message;
+      if (state.mode === MODE_GENERATED) {
+        const source = updateGeneratedEligibility(beforeChat);
+        if (!source.ok) {
+          await stopWithError('AI 자동 응답 모드를 계속할 수 없습니다.', source.reason);
+          return;
+        }
+
+        const signatureBeforeGeneration = conversationSignature(beforeChat);
+        state.phase = 'generating';
+        state.status = `${state.completedTurns + 1}번째 사용자 메시지를 보조모델로 생성하는 중입니다.`;
+        state.error = '';
+        render();
+
+        try {
+          outgoingMessage = await generateNextUserMessage(beforeChat, source);
+        } catch (error) {
+          if (token !== state.sessionToken) return;
+          await stopWithError('보조모델이 사용자 메시지를 생성하지 못했습니다.', errorMessage(error));
+          return;
+        }
+
+        if (token !== state.sessionToken) return;
+        if (state.stopRequested) {
+          finishStopped();
+          return;
+        }
+
+        try {
+          activeChatMatches = await sameActiveChat();
+        } catch (error) {
+          await stopWithError('보조모델 생성 후 현재 채팅을 확인하지 못했습니다.', errorMessage(error));
+          return;
+        }
+        if (!activeChatMatches) {
+          await stopWithError('보조모델 생성 중 캐릭터 또는 채팅이 변경되었습니다.');
+          return;
+        }
+
+        let latestChat;
+        try {
+          latestChat = await api.getChatFromIndex(
+            state.activeCharacterIndex,
+            state.activeChatIndex,
+          );
+        } catch (error) {
+          await stopWithError('보조모델 생성 후 채팅 상태를 읽지 못했습니다.', errorMessage(error));
+          return;
+        }
+        if (!latestChat || !Array.isArray(latestChat.message)) {
+          await stopWithError('보조모델 생성 후 메시지 목록을 찾을 수 없습니다.');
+          return;
+        }
+        if (conversationSignature(latestChat) !== signatureBeforeGeneration) {
+          await stopWithError(
+            '보조모델 생성 중 채팅 내용이 변경되었습니다.',
+            '생성된 메시지는 전송하지 않았습니다.',
+          );
+          return;
+        }
+
+        const latestSource = updateGeneratedEligibility(latestChat);
+        if (!latestSource.ok || latestSource.identity !== source.identity) {
+          await stopWithError(
+            '메시지 생성의 기준이 된 캐릭터 응답이 변경되었습니다.',
+            '생성된 메시지는 전송하지 않았습니다.',
+          );
+          return;
+        }
+
+        beforeChat = latestChat;
+        state.generatedMessage = outgoingMessage;
+      }
+
+      if (!String(outgoingMessage || '').trim()) {
+        await stopWithError('전송할 사용자 메시지가 비어 있습니다.');
+        return;
+      }
+
       const before = snapshotChat(beforeChat);
       const startedAt = Date.now();
       state.phase = 'sending';
@@ -721,14 +1275,14 @@
 
       let sendResult;
       try {
-        sendResult = await api.sendChat(state.message);
+        sendResult = await api.sendChat(outgoingMessage);
       } catch (error) {
         await stopWithError('채팅 전송 중 예외가 발생했습니다.', errorMessage(error));
         return;
       }
 
       if (token !== state.sessionToken) return;
-      if (sendResult !== true) {
+      if (sendResult === false) {
         await stopWithError('RisuAI가 채팅 전송을 완료하지 못했습니다.');
         return;
       }
@@ -787,6 +1341,7 @@
         return;
       }
 
+      updateGeneratedEligibility(afterChat);
       state.completedTurns += 1;
       if (state.stopRequested) {
         finishStopped();
@@ -808,29 +1363,40 @@
     }
   }
 
+  function showIdleError(status, details) {
+    state.phase = 'error';
+    state.status = status;
+    state.error = details;
+    render();
+  }
+
   async function startAutopilot() {
     if (state.running) return;
+    syncFormStateFromDOM();
+
     if (typeof api.sendChat !== 'function') {
-      await stopWithError(
-        '현재 RisuAI 버전에는 플러그인 sendChat API가 없습니다.',
-        'RisuAI를 v2026.3.330 이상으로 업데이트해 주세요.',
+      showIdleError(
+        '현재 RisuAI 버전에서는 시작할 수 없습니다.',
+        '플러그인 sendChat API가 없습니다. RisuAI를 v2026.3.330 이상으로 업데이트해 주세요.',
       );
       return;
     }
-
-    const turnInput = document.getElementById('autopilot-turns');
-    const messageInput = document.getElementById('autopilot-message');
-    const requestedMessage = String(messageInput?.value ?? state.message);
-    if (!requestedMessage.trim()) {
-      state.phase = 'error';
-      state.status = '전송 메시지를 입력해 주세요.';
-      state.error = '빈 메시지는 자동 전송할 수 없습니다.';
-      render();
+    if (state.mode === MODE_GENERATED && typeof api.runLLMModel !== 'function') {
+      showIdleError(
+        'AI 자동 응답 모드를 시작할 수 없습니다.',
+        '현재 RisuAI 버전에는 플러그인 runLLMModel API가 없습니다.',
+      );
       return;
     }
-    state.targetTurns = clampTurnCount(turnInput?.value);
-    state.message = requestedMessage;
+    if (state.mode === MODE_FIXED && !state.message.trim()) {
+      showIdleError('전송 메시지를 입력해 주세요.', '빈 메시지는 자동 전송할 수 없습니다.');
+      return;
+    }
+
+    state.targetTurns = clampTurnCount(state.targetTurns);
     state.completedTurns = 0;
+    state.generatedMessage = '';
+    state.personaContext = null;
     state.error = '';
     state.sessionToken += 1;
     const token = state.sessionToken;
@@ -857,12 +1423,9 @@
       return;
     }
 
+    let chat;
     try {
-      await refreshContext();
-      const chat = await api.getChatFromIndex(
-        state.activeCharacterIndex,
-        state.activeChatIndex,
-      );
+      chat = await refreshContext();
       if (!chat || !Array.isArray(chat.message)) {
         await stopWithError('자동 진행을 시작할 활성 채팅이 없습니다.');
         return;
@@ -872,12 +1435,34 @@
       return;
     }
 
+    if (state.mode === MODE_GENERATED) {
+      const source = updateGeneratedEligibility(chat);
+      if (!source.ok) {
+        await stopWithError('AI 자동 응답 모드를 시작할 수 없습니다.', source.reason);
+        return;
+      }
+
+      if (state.includePersona) {
+        state.phase = 'permission';
+        state.status = '현재 페르소나 정보를 확인하는 중입니다.';
+        render();
+        try {
+          state.personaContext = await resolvePersonaContext(chat);
+        } catch (error) {
+          await stopWithError('페르소나 정보를 보조모델에 포함하지 못했습니다.', errorMessage(error));
+          return;
+        }
+      }
+    }
+
     if (state.stopRequested || token !== state.sessionToken) {
       if (token === state.sessionToken) finishStopped();
       return;
     }
-    state.phase = 'sending';
-    state.status = '자동 진행을 시작합니다.';
+    state.phase = state.mode === MODE_GENERATED ? 'generating' : 'sending';
+    state.status = state.mode === MODE_GENERATED
+      ? '첫 사용자 메시지를 보조모델로 생성합니다.'
+      : '자동 진행을 시작합니다.';
     render();
     void runAutopilot(token).catch(async (error) => {
       if (token !== state.sessionToken) return;
@@ -889,7 +1474,18 @@
     if (!state.running || state.stopRequested) return;
     state.stopRequested = true;
     state.phase = 'stopping';
-    state.status = '현재 응답의 후처리가 끝나면 중단합니다.';
+    state.status = '현재 진행 중인 모델 호출이 끝나면 중단합니다.';
+    render();
+  }
+
+  function selectMode(mode) {
+    if (state.running) return;
+    syncFormStateFromDOM();
+    state.mode = mode === MODE_GENERATED ? MODE_GENERATED : MODE_FIXED;
+    state.phase = 'idle';
+    state.status = '자동 진행 모드와 턴 수를 설정해 주세요.';
+    state.error = '';
+    scheduleSettingsSave();
     render();
   }
 
@@ -901,9 +1497,10 @@
       const target = event.target.closest('[data-action]');
       if (!target) return;
       const action = target.dataset.action;
-      if (action === 'close') await api.hideContainer();
+      if (action === 'close') await closeUI();
       else if (action === 'start') await startAutopilot();
       else if (action === 'stop') requestStop();
+      else if (action === 'select-mode') selectMode(target.dataset.mode);
     });
 
     document.body.addEventListener('pointerdown', startPanelDrag);
@@ -912,14 +1509,36 @@
     document.addEventListener('pointercancel', stopPanelDrag);
     window.addEventListener('resize', applyPanelPosition);
 
+    document.body.addEventListener('input', (event) => {
+      if (![
+        'autopilot-turns',
+        'autopilot-message',
+        'autopilot-instructions',
+        'autopilot-context-messages',
+        'autopilot-include-persona',
+      ].includes(event.target.id)) return;
+      scheduleSettingsSave();
+    });
+
     document.body.addEventListener('change', (event) => {
-      if (event.target.id !== 'autopilot-turns') return;
-      event.target.value = String(clampTurnCount(event.target.value));
+      if (event.target.id === 'autopilot-turns') {
+        event.target.value = String(clampTurnCount(event.target.value));
+      } else if (event.target.id === 'autopilot-context-messages') {
+        event.target.value = String(clampContextMessageCount(event.target.value));
+      }
+      if ([
+        'autopilot-turns',
+        'autopilot-message',
+        'autopilot-instructions',
+        'autopilot-context-messages',
+        'autopilot-include-persona',
+      ].includes(event.target.id)) scheduleSettingsSave();
     });
 
     document.addEventListener('keydown', async (event) => {
-      if (event.key === 'Escape') await api.hideContainer();
-      if (event.key === 'Enter' && !state.running && event.target.id === 'autopilot-turns') {
+      if (event.key === 'Escape') await closeUI();
+      if (event.key === 'Enter' && !state.running
+        && (event.target.id === 'autopilot-turns' || event.target.id === 'autopilot-context-messages')) {
         event.preventDefault();
         await startAutopilot();
       }
@@ -941,12 +1560,13 @@
     await api.onUnload(async () => {
       state.stopRequested = true;
       state.sessionToken += 1;
+      await flushSettingsSave();
       window.removeEventListener('resize', applyPanelPosition);
       const chatButtonId = state.chatButtonPart?.id || state.chatButtonPart || CHAT_BUTTON_ID;
       if (chatButtonId) await api.unregisterUIPart(chatButtonId);
     });
 
-    console.log('[Autopilot] v1.3.0 loaded');
+    console.log('[Autopilot] v1.7.0 loaded');
   } catch (error) {
     console.error('[Autopilot] 초기화에 실패했습니다.', error);
   }
