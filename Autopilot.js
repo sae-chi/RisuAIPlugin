@@ -2,6 +2,7 @@
 //@api 3.0
 //@version 1.3.0
 //@display-name Autopilot
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/Autopilot.js
 
 (async () => {
   'use strict';

@@ -2,6 +2,7 @@
 //@display-name 채팅 찾기/바꾸기
 //@api 3.0
 //@version 1.0.0
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/chat-find-replace.js
 
 (async () => {
   const api = globalThis.Risuai || globalThis.risuai;

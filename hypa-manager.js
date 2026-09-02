@@ -3,6 +3,7 @@
 //@api 3.0
 //@version 1.7.6
 //@arg summary_prompt string Default summary prompt
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/hypa-manager.js
 
 (async () => {
   try {
