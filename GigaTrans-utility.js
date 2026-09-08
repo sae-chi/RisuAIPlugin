@@ -360,6 +360,8 @@
     .toolbar button{flex-shrink:0}
 
     /* ── 검색바 ── */
+    .search-panel{flex-shrink:0;min-width:0}
+    .search-toggle{display:none}
     .searchbar{
       flex-shrink:0;
       display:grid;
@@ -554,6 +556,15 @@
       .cols>.card+.card{border-left:none;border-top:1px solid var(--line)}
       .editor{min-height:40vh;resize:vertical}
       .searchbar{grid-template-columns:1fr 1fr}
+      .search-toggle{
+        display:flex;width:100%;justify-content:space-between;
+        padding:10px 16px;min-height:44px;border:0;
+        border-bottom:1px solid var(--line);border-radius:0;
+        background:var(--sidebar);color:var(--dark-teal);font-weight:600
+      }
+      .search-toggle:after{content:'＋'}
+      .search-toggle[aria-expanded=true]:after{content:'－'}
+      .search-panel.is-collapsed>.searchbar{display:none}
       .searchbar input{grid-column:1/-1}
       .searchbar select{grid-column:1/-1}
       .token-results{grid-template-columns:1fr}
@@ -735,7 +746,17 @@
     function moveMatch(delta){if(!matches.length)return;matchIndex=matchIndex<0?(delta<0?matches.length-1:0):(matchIndex+delta+matches.length)%matches.length;const m=matches[matchIndex],input=$(m.id);input.focus();input.setSelectionRange(m.start,m.end);const style=getComputedStyle(input),canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');ctx.font=style.font;const width=Math.max(1,input.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight));const lines=input.value.slice(0,m.start).split('\n').reduce((n,line)=>n+Math.max(1,Math.ceil(ctx.measureText(line).width/width)),0);input.scrollTop=Math.max(0,(lines-1)*parseFloat(style.lineHeight)-input.clientHeight/2);count.textContent=(matchIndex+1)+' / '+matches.length+' · '+(m.id==='original'?'원문':'번역문');}
     query.addEventListener('input',updateSearch);scope.addEventListener('change',updateSearch);
     search.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();moveMatch(e.shiftKey?-1:1);}});
-    search.append(query,scope,button('이전 결과',()=>moveMatch(-1)),button('다음 결과',()=>moveMatch(1)),count);shell.append(search);
+    search.append(query,scope,button('이전 결과',()=>moveMatch(-1)),button('다음 결과',()=>moveMatch(1)),count);
+    search.id='search-fields';
+    const searchPanel=el('div',{className:'search-panel is-collapsed'});
+    const searchToggle=button('검색',()=>{
+      const collapsed=searchPanel.classList.toggle('is-collapsed');
+      searchToggle.setAttribute('aria-expanded',String(!collapsed));
+    });
+    searchToggle.className='search-toggle';
+    searchToggle.setAttribute('aria-expanded','false');
+    searchToggle.setAttribute('aria-controls','search-fields');
+    searchPanel.append(searchToggle,search);shell.append(searchPanel);
     const cols=el('div',{className:'cols'});
     for(const [id,title,value] of [['original','원문',pair.original],['translation','번역문',pair.translation]]) {
       const card=el('section',{className:'card'}),head=el('div',{className:'label'}),input=el('textarea',{id,className:'editor',value,ariaLabel:title,spellcheck:false});
