@@ -525,17 +525,24 @@
         height:auto;padding:0;overflow:visible;
         border-right:none;border-bottom:1px solid var(--line)
       }
-      .brand{border-bottom:none;flex:1;padding:12px 16px}
+      .brand{border-bottom:none;flex:1;min-width:0;padding:12px 16px}
       .top-actions{
-        flex-direction:row;padding:0 12px;
-        order:3;width:100%;border-top:1px solid var(--line)
+        flex-direction:row;align-items:center;padding:0 12px 0 0;
+        order:1;width:auto;border-top:none
       }
-      .theme-toggle,.close-button{width:auto}
+      .theme-toggle{width:40px;height:40px;padding:0;justify-content:center;font-size:0;gap:0}
+      .theme-toggle:before{font-size:22px}
+      .close-button{width:auto}
+      .top-actions .close-button{margin-left:0;padding:8px 10px;min-height:40px}
+      .top>#view-toolbar{order:3;width:100%;border-top:none}
+      .top>#view-toolbar:empty{display:none}
+      #view-toolbar{flex-wrap:nowrap;gap:6px;padding:8px 12px}
+      #view-toolbar button{padding:8px 10px;font-size:12px;min-height:40px}
       .sidebar-controls{order:4;width:100%;padding:12px 16px}
       .top>.notice{order:5;width:calc(100% - 32px);margin:0 16px 12px}
       .tabs{
-        flex-direction:row;padding:0;order:2;
-        border-left:1px solid var(--line)
+        flex-direction:row;padding:0;order:2;width:100%;
+        border-left:none;border-bottom:1px solid var(--line)
       }
       .tabs button{width:auto;border-radius:0}
       .tabs button[aria-selected=true]{
@@ -634,7 +641,9 @@
   }
   function dirty() {return view && $('original') && ($('original').value!==view.pair.original||$('translation').value!==view.pair.translation||$('protected-head')?.value!==protectedValues(view.pair).head||$('protected-tail')?.value!==protectedValues(view.pair).tail);}
   function canLeave() {return !uiBusy && (!dirty()||confirm('저장하지 않은 편집 내용을 버릴까요?'));}
+  let cleanupResponsiveLayout=null;
   function layout(active='editor') {
+    cleanupResponsiveLayout?.();
     document.head.querySelector('#gt-style')?.remove();
     document.head.append(el('style',{id:'gt-style',textContent:CSS}));
     document.body.replaceChildren();
@@ -670,13 +679,28 @@
     sidebar.append(el('div',{id:'sidebar-controls',className:'sidebar-controls'}));
     const status=el('div',{id:'notice',className:'notice',role:'status'});
     if(active==='editor')sidebar.append(status);
-    sidebar.append(el('div',{className:'top-actions'},[themeToggle]));
+    const topActions=el('div',{className:'top-actions'},[themeToggle]);
+    sidebar.append(topActions);
     const content=el('section',{id:'tab-content',role:'tabpanel'});
     content.setAttribute('aria-labelledby','tab-'+active);
     if(active!=='editor')content.append(status);
-    content.append(el('div',{id:'view-toolbar',className:'toolbar'},[close]));
+    const toolbar=el('div',{id:'view-toolbar',className:'toolbar'},[close]);
+    content.append(toolbar);
     shell.append(sidebar,content);
     document.body.append(shell);
+    const mobile=window.matchMedia('(max-width:900px)');
+    const arrangeToolbar=()=>{
+      if(mobile.matches){
+        topActions.append(close);
+        nav.after(toolbar);
+      }else{
+        toolbar.append(close);
+        content.prepend(toolbar);
+      }
+    };
+    arrangeToolbar();
+    mobile.addEventListener('change',arrangeToolbar);
+    cleanupResponsiveLayout=()=>mobile.removeEventListener('change',arrangeToolbar);
     applyTheme();
     return content;
   }
@@ -697,7 +721,7 @@
     });
     const move=async delta=>{if(!canLeave())return;const pos=indices.indexOf(Number(sel.value));const next=indices[pos+delta];if(next!==undefined)await openViewer(next);};
     $('sidebar-controls').append(sel);
-    bar.prepend(button('← 이전',()=>move(-1)),button('다음 →',()=>move(1)),button('새로고침',async()=>{if(canLeave())await openViewer(Number(sel.value));}));shell.append(bar);
+    bar.prepend(button('← 이전',()=>move(-1)),button('다음 →',()=>move(1)),button('새로고침',async()=>{if(canLeave())await openViewer(Number(sel.value));}));
     sel.addEventListener('change',()=>{const i=Number(sel.value);if(canLeave())openViewer(i).catch(e=>notice(e.message,true));else sel.value=String(view.snap.index);});
     if(!indices.length){notice('현재 채팅에 캐릭터 메시지가 없습니다.');await R.showContainer('fullscreen');return;}
     const i=indices.includes(index)?index:indices.at(-1);sel.value=String(i);
