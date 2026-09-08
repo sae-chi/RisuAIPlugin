@@ -766,7 +766,6 @@
       result.replaceChildren();
       for(const [title,n]of [['선택한 원문 · 저장됨',currentTokens],['캐릭터 원문 합계 · 저장됨',summary.originals],['대화 합계 · 원문 + 사용자',summary.total]])result.append(el('div',{className:'token-stat'},[el('span',{textContent:title}),el('strong',{textContent:'약 '+n.toLocaleString()+' 토큰'})]));
       result.append(el('p',{className:'small',textContent:'저장된 캐릭터 메시지 '+summary.characters+'개 · 사용자 메시지 약 '+summary.users.toLocaleString()+' 토큰'+(summary.skipped?' · 태그가 손상된 메시지 '+summary.skipped+'개 제외':'')}));
-      const p=TOKEN_PROFILES[profile.value];result.append(el('p',{className:'small',textContent:'가정: ASCII '+p.ascii+'자/토큰 · 한글 '+p.hangul+'토큰/자 · 한자·가나 '+p.cjk+'토큰/자. 전체 합계는 저장된 채팅 기준이며, 시스템 프롬프트·로어북·이미지 토큰·메시지 형식 비용은 제외합니다. 보호 데이터 제외 시 사용자 정의 패턴은 판별하지 않습니다.'}));
     };
     const clearEstimate=()=>result.replaceChildren(el('p',{className:'small',textContent:'내용 또는 기준이 변경되었습니다. 다시 계산하세요.'}));
     profile.addEventListener('change',clearEstimate);include.addEventListener('change',clearEstimate);
