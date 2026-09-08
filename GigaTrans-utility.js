@@ -2,6 +2,8 @@
 //@display-name GigaTrans Utility
 //@api 3.0
 //@version 1.6.0
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/GigaTrans-utility.js
+
 ;(async function () {
   'use strict';
   const R = typeof Risuai !== 'undefined' ? Risuai : typeof risuai !== 'undefined' ? risuai : null;
