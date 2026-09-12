@@ -2,6 +2,7 @@
 //@display-name 로어북 다운로더
 //@api 3.0
 //@version 1.1.1
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/lorebook_downloader.js
 
 // Standalone API v3 plugin. No network requests or database writes.
 (() => {
