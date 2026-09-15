@@ -1,7 +1,7 @@
 //@name lorebook_downloader
-//@display-name 로어북 다운로더
+//@display-name 로어북·정규식 다운로더
 //@api 3.0
-//@version 1.1.1
+//@version 1.2.0
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/lorebook_downloader.js
 
 // Standalone API v3 plugin. No network requests or database writes.
@@ -141,6 +141,32 @@
     return { payload: { type: 'risu', ver: 1, data }, extra: included.size - requestedCount };
   }
 
+  function normalizeRegexEntries(value) {
+    if (value == null) return [];
+    if (!Array.isArray(value)) throw new Error('정규식 목록이 배열이 아닙니다.');
+    return value.map((entry, index) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+          !['in', 'out', 'type'].every(key => typeof entry[key] === 'string') ||
+          (entry.comment != null && typeof entry.comment !== 'string') ||
+          (entry.flag != null && typeof entry.flag !== 'string') ||
+          (entry.ableFlag != null && typeof entry.ableFlag !== 'boolean')) {
+        throw new Error(`${index + 1}번째 정규식 항목 형식이 올바르지 않습니다.`);
+      }
+      return clone(entry);
+    });
+  }
+
+  function buildRegexExport(entries, selected, name) {
+    const data = normalizeRegexEntries(entries);
+    if (!selected.size) throw new Error('내보낼 항목을 선택하세요.');
+    for (const index of selected) {
+      if (!Number.isInteger(index) || index < 0 || index >= data.length) {
+        throw new Error('선택이 유효하지 않습니다. 새로고침하세요.');
+      }
+    }
+    return { payload: { type: 'regex', name: name || '정규식', data: data.filter((_, i) => selected.has(i)) }, extra: 0 };
+  }
+
   function filename(name) {
     let safe = String(name || 'lorebook').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim().replace(/[. ]+$/g, '');
     if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(safe)) safe = '_' + safe;
@@ -149,7 +175,7 @@
 
   // Node-only entry for format/round-trip tests; not used inside RisuAI.
   if (typeof module !== 'undefined' && module.exports && typeof document === 'undefined') {
-    module.exports = { buildExport, filename, validate, normalizeEntries, expandSelection, buildTree };
+    module.exports = { buildExport, buildRegexExport, normalizeRegexEntries, filename, validate, normalizeEntries, expandSelection, buildTree };
     return;
   }
 
@@ -160,6 +186,11 @@
   const urls = new Map();
   const registrations = [];
   let sourceIndex = 0;
+  let activeTab = 'lorebook';
+  const isRegex = () => activeTab === 'regex';
+  const kindName = () => isRegex() ? '정규식' : '로어북';
+  const regexTypes = { editinput: '입력 수정', editoutput: '출력 수정', editprocess: '요청 수정', editdisplay: '표시 수정' };
+  const effectiveSelection = (entries, indices) => isRegex() ? new Set(indices) : expandSelection(entries, indices);
   let loading = false;
   let disposed = false;
   const $ = id => document.getElementById(id);
@@ -189,6 +220,9 @@
 
     * { box-sizing: border-box; }
     body { margin: 0; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+    .tabs button[aria-pressed=true] { background: var(--accent-dim); color: #fff; border-color: var(--accent); }
+    [hidden] { display: none !important; }
 
     /* ── 레이아웃 ──────────────────────────────────────── */
     main {
@@ -588,14 +622,18 @@
     <div class="header">
       <div class="header-title">
         <h1>Lorebook Downloader</h1>
-        <p>원하는 항목과 폴더를 RisuAI 가져오기용 JSON으로 저장합니다.</p>
+        <p>원하는 로어북과 정규식을 선택해 JSON으로 저장합니다.</p>
       </div>
       <button id="close">닫기</button>
     </div>
 
+    <nav class="tabs" aria-label="다운로드 종류">
+      <button id="tab-lorebook" aria-pressed="true">로어북</button>
+      <button id="tab-regex" aria-pressed="false">정규식</button>
+    </nav>
     <div class="panel">
       <div class="panel-row">
-        <label class="grow">로어북 위치
+        <label class="grow"><span id="sourceLabel">로어북 위치</span>
           <select id="source" aria-label="로어북 위치">
             <option value="0">캐릭터 로어북</option>
             <option value="1">현재 채팅 로어북</option>
@@ -643,7 +681,7 @@
   }
   function current() { return sources[sourceIndex]; }
   function displayEntry(entry) {
-    if (entry.mode !== 'child') return entry;
+    if (isRegex() || entry.mode !== 'child') return entry;
     const parent = current()?.parents?.find(e => e.id != null && e.id === entry.id);
     return parent ? { ...entry, comment: parent.comment, content: parent.content } : entry;
   }
@@ -654,27 +692,27 @@
   }
   function updateCount() {
     const entries = current()?.entries || [];
-    const effective = expandSelection(entries, selected);
+    const effective = effectiveSelection(entries, selected);
     const folderCount = [...effective].filter(i => entries[i].mode === 'folder').length;
-    $('count').textContent = effective.size ? `로어 ${effective.size - folderCount}개 · 폴더 ${folderCount}개 선택` : '선택한 항목 없음';
+    $('count').textContent = isRegex() ? `정규식 ${effective.size}개 선택` : effective.size ? `로어 ${effective.size - folderCount}개 · 폴더 ${folderCount}개 선택` : '선택한 항목 없음';
     $('export').disabled = loading || !selected.size;
   }
   function showSourceStatus() {
     const source = current();
     if (source?.error) status(`${source.name}: ${source.error}`, true);
-    else status(`선택한 위치: ${source?.name || '로어북'}\n개별 저장하거나 항목·폴더를 선택하세요.`);
+    else status(`선택한 위치: ${source?.name || '로어북'}\n${isRegex() ? '개별 저장하거나 정규식을 선택하세요.' : '개별 저장하거나 항목·폴더를 선택하세요.'}`);
   }
   function visibleEntries() {
     const query = $('search').value.trim().toLocaleLowerCase();
     return (current()?.entries || []).map((entry, index) => ({ entry, index })).filter(({ entry }) =>
-      !query || [displayEntry(entry).comment, entry.key, displayEntry(entry).content].some(v => String(v || '').toLocaleLowerCase().includes(query)));
+      !query || (isRegex() ? [entry.comment, entry.in, entry.out] : [displayEntry(entry).comment, entry.key, displayEntry(entry).content]).some(v => String(v || '').toLocaleLowerCase().includes(query)));
   }
   function renderSources() {
     $('source').replaceChildren();
     sources.forEach((source, index) => {
       const option = document.createElement('option');
       option.value = String(index);
-      option.textContent = `${source.name} (${source.error ? '불러오지 못함' : source.entries.filter(e => e.mode !== 'folder').length + '개'})`;
+      option.textContent = `${source.name} (${source.error ? '불러오지 못함' : source.entries.filter(e => isRegex() || e.mode !== 'folder').length + '개'})`;
       $('source').appendChild(option);
     });
     $('source').value = String(sourceIndex);
@@ -684,9 +722,9 @@
     $('list').replaceChildren();
     const fragment = document.createDocumentFragment();
     const entries = current()?.entries || [];
-    const tree = buildTree(entries);
+    const tree = isRegex() ? { parents: entries.map(() => -1), children: new Map([[-1, entries.map((_, i) => i)]]) } : buildTree(entries);
     const matches = new Set(visibleEntries().map(({ index }) => index));
-    const shown = expandSelection(entries, matches);
+    const shown = effectiveSelection(entries, matches);
     for (const index of [...shown]) {
       let parent = tree.parents[index];
       while (parent !== -1) { shown.add(parent); parent = tree.parents[parent]; }
@@ -696,7 +734,7 @@
     function appendEntry(index, container) {
       if (!shown.has(index)) return;
       const entry = entries[index];
-      const isFolder = entry.mode === 'folder';
+      const isFolder = !isRegex() && entry.mode === 'folder';
       const displayed = displayEntry(entry);
       const row = document.createElement(isFolder ? 'summary' : 'div'); row.className = 'row'; row.dataset.index = String(index);
       const check = document.createElement('input'); check.type = 'checkbox'; check.id = `entry-${index}`;
@@ -712,13 +750,14 @@
       const label = document.createElement(isFolder ? 'span' : 'label'); label.className = 'entry-title';
       if (!isFolder) label.htmlFor = check.id;
       const name = document.createElement('span'); name.className = 'name';
-      name.textContent = `${isFolder ? '📁 ' : ''}${title(displayed, index)}${entry.mode === 'child' ? ' (캐릭터 로어 참조)' : ''}`;
+      name.textContent = `${isFolder ? '📁 ' : ''}${title(displayed, index)}${!isRegex() && entry.mode === 'child' ? ' (캐릭터 로어 참조)' : ''}`;
       const meta = document.createElement('span'); meta.className = 'meta';
       if (isFolder) {
         const descendants = expandSelection(entries, new Set([index]));
         const count = [...descendants].filter(i => entries[i].mode !== 'folder').length;
         meta.textContent = `로어 ${count}개 · 폴더 선택 시 전체 포함${searching ? ` · 검색 일치 ${[...descendants].filter(i => matches.has(i)).length}개` : ''}`;
-      } else meta.textContent = entry.alwaysActive ? '항상 활성화' : `키워드: ${entry.key || '없음'}`;
+      } else if (isRegex()) meta.textContent = `${regexTypes[entry.type] || entry.type} · 찾기: ${entry.in || '(빈 패턴)'} · 플래그: ${entry.ableFlag ? (entry.flag ?? '') : '기본값'}`;
+      else meta.textContent = entry.alwaysActive ? '항상 활성화' : `키워드: ${entry.key || '없음'}`;
       label.append(name, meta);
       const save = document.createElement('button'); save.textContent = isFolder ? '폴더 다운로드' : '개별 다운로드';
       save.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); saveSelection(new Set([index]), title(displayed, index)); });
@@ -748,7 +787,7 @@
   }
   function updateSelectionState() {
     const entries = current()?.entries || [];
-    const effective = expandSelection(entries, selected);
+    const effective = effectiveSelection(entries, selected);
     for (const row of $('list').querySelectorAll('.row')) {
       const index = Number(row.dataset.index);
       const check = row.querySelector('input');
@@ -756,7 +795,7 @@
       check.checked = effective.has(index);
       check.disabled = inherited;
       check.title = inherited ? '상위 폴더 선택에 포함되어 있습니다. 개별 선택하려면 상위 폴더의 체크를 해제하세요.' : '';
-      check.indeterminate = entries[index].mode === 'folder' && !check.checked &&
+      check.indeterminate = !isRegex() && entries[index].mode === 'folder' && !check.checked &&
         [...expandSelection(entries, new Set([index]))].some(i => i !== index && effective.has(i));
       row.classList.toggle('selected', selected.has(index));
       row.classList.toggle('included', inherited);
@@ -766,7 +805,7 @@
   async function busy(action) {
     if (loading || disposed) return;
     loading = true;
-    const controls = ['refresh', 'source'];
+    const controls = ['refresh', 'source', 'tab-lorebook', 'tab-regex'];
     controls.forEach(id => { $(id).disabled = true; }); updateCount();
     try { await action(); } catch (error) { status(error.message || String(error), true); }
     finally { loading = false; controls.forEach(id => { $(id).disabled = false; }); updateCount(); }
@@ -777,10 +816,10 @@
       const previousSourceKey = current()?.key;
       sourceIndex = 0;
       sources.splice(0, sources.length,
-        { key: 'character', name: '캐릭터 로어북', entries: [], error: '불러오는 중…' },
-        { key: 'chat', name: '현재 채팅 로어북', entries: [], error: '불러오는 중…' });
+        { key: 'character', name: `캐릭터 ${kindName()}`, entries: [], error: '불러오는 중…' },
+        ...(!isRegex() ? [{ key: 'chat', name: '현재 채팅 로어북', entries: [], error: '불러오는 중…' }] : []));
       resetSelection(); $('search').value = ''; renderSources();
-      status('캐릭터·채팅·모듈 로어북을 불러오는 중…');
+      status(`${kindName()}을 불러오는 중…`);
       let character;
       try {
         character = await api.getCharacter();
@@ -791,16 +830,16 @@
       }
       if (character) {
         const chat = character.chats?.[character.chatPage];
-        sources[0].name = `${character.name || '캐릭터'} · 캐릭터 로어북`;
-        sources[1].name = `${chat?.name || '현재 채팅'} · 채팅 로어북`;
-        for (const [index, value] of [[0, character.globalLore], [1, chat?.localLore]]) {
+        sources[0].name = `${character.name || '캐릭터'} · 캐릭터 ${kindName()}`;
+        if (!isRegex()) sources[1].name = `${chat?.name || '현재 채팅'} · 채팅 로어북`;
+        for (const [index, value] of (isRegex() ? [[0, character.customscript]] : [[0, character.globalLore], [1, chat?.localLore]])) {
           try {
             if (index === 1 && !chat) throw new Error('현재 채팅을 찾을 수 없습니다. 채팅을 선택한 뒤 새로고침하세요.');
-            sources[index].entries = normalizeEntries(value);
+            sources[index].entries = isRegex() ? normalizeRegexEntries(value) : normalizeEntries(value);
             delete sources[index].error;
           } catch (error) { sources[index].error = error.message || String(error); }
         }
-        sources[1].parents = sources[0].entries;
+        if (!isRegex()) sources[1].parents = sources[0].entries;
       }
       // Read modules independently so they remain available without a selected character.
       try {
@@ -810,17 +849,17 @@
         database.modules.forEach((module, index) => {
           const source = {
             key: `module:${module?.id || index}`,
-            name: `${module?.name || `이름 없는 모듈 ${index + 1}`} · 모듈 로어북`,
+            name: `${module?.name || `이름 없는 모듈 ${index + 1}`} · 모듈 ${kindName()}`,
             entries: []
           };
           try {
             if (!module || typeof module !== 'object' || Array.isArray(module)) throw new Error('모듈 형식이 올바르지 않습니다.');
-            source.entries = normalizeEntries(module.lorebook);
+            source.entries = isRegex() ? normalizeRegexEntries(module.regex) : normalizeEntries(module.lorebook);
           } catch (error) { source.error = error.message || String(error); }
           sources.push(source);
         });
       } catch (error) {
-        sources.push({ key: 'modules-error', name: '모듈 로어북', entries: [], error: error.message || String(error) });
+        sources.push({ key: 'modules-error', name: `모듈 ${kindName()}`, entries: [], error: error.message || String(error) });
       }
       sourceIndex = Math.max(0, sources.findIndex(source => source.key === previousSourceKey));
       renderSources();
@@ -832,20 +871,50 @@
   function saveSelection(indices, name) {
     try {
       if (loading) return;
-      if (!current()) throw new Error('먼저 로어북을 불러오세요.');
+      if (!current()) throw new Error(`먼저 ${kindName()}을 불러오세요.`);
       if (current().error) throw new Error(current().error);
       const parents = current().parents || [];
       const combined = parents.concat(current().entries);
       const shifted = new Set([...indices].map(i => i + parents.length));
-      const result = buildExport(combined, shifted);
+      const result = isRegex() ? buildRegexExport(current().entries, indices, name) : buildExport(combined, shifted);
       const blob = new Blob([JSON.stringify(result.payload, null, 2)], { type: 'application/json;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename(name);
       document.body.appendChild(anchor); anchor.click(); anchor.remove();
       urls.set(url, setTimeout(() => { URL.revokeObjectURL(url); urls.delete(url); }, 60000));
+      if (isRegex()) {
+        status(`다운로드 요청: ${filename(name)}\n정규식 ${result.payload.data.length}개. 브라우저 다운로드 목록을 확인하세요.`);
+        return;
+      }
       const loreCount = result.payload.data.filter(e => e.mode !== 'folder').length;
       status(`다운로드 요청: ${filename(name)}\n로어 ${loreCount}개 · 폴더 ${result.payload.data.length - loreCount}개${result.extra ? ` (참조에 필요한 원본 로어 ${result.extra}개 자동 포함)` : ''}. 브라우저 다운로드 목록을 확인하세요.`);
     } catch (error) { status(error.message || String(error), true); }
+  }
+
+  function updateTabUI() {
+    for (const kind of ['lorebook', 'regex']) $('tab-' + kind).setAttribute('aria-pressed', String(activeTab === kind));
+    $('sourceLabel').textContent = kindName() + ' 위치';
+    $('source').setAttribute('aria-label', kindName() + ' 위치');
+    $('search').placeholder = isRegex() ? '이름 · 찾기 패턴 · 치환 내용 검색' : '이름 · 키워드 · 내용 검색';
+    $('search').setAttribute('aria-label', kindName() + ' 검색');
+    $('collapse').hidden = isRegex();
+    document.querySelector('.tree-help').textContent = isRegex()
+      ? '정규식을 개별 저장하거나 선택해 함께 저장할 수 있습니다. 원래 목록 순서가 유지됩니다.'
+      : '폴더 이름을 누르면 펼쳐집니다. 폴더에 체크하면 내부 로어 전체가 선택됩니다.';
+    document.querySelector('.footer-hint').textContent = isRegex()
+      ? '정규식 JSON은 RisuAI 모듈 가져오기로 추가할 수 있습니다. 참조하는 에셋·변수·트리거는 포함되지 않습니다.'
+      : '선택 항목을 JSON으로 저장합니다. 로어만 선택 시 상위 폴더는 포함되지 않습니다. 받은 파일은 RisuAI 로어북의 가져오기로 추가하세요.';
+    document.querySelector('.guide > p').textContent = isRegex()
+      ? '현재 봇 내부 정규식과 설치된 모든 모듈 내부 정규식을 지원합니다. 모듈은 활성화 여부와 관계없이 각각 선택할 수 있습니다. 봇 전환이나 편집 후에는 새로고침하세요.'
+      : '캐릭터·현재 채팅 로어북과 설치된 모든 모듈의 로어북을 지원합니다. 모듈은 활성화 여부와 관계없이 각각 선택할 수 있습니다. 캐릭터·채팅 전환이나 편집 후에는 새로고침하세요.';
+  }
+  for (const kind of ['lorebook', 'regex']) {
+    $('tab-' + kind).addEventListener('click', async () => {
+      if (loading || disposed || activeTab === kind) return;
+      activeTab = kind;
+      updateTabUI();
+      await refresh();
+    });
   }
 
   $('close').addEventListener('click', () => api.hideContainer().catch(error => status(String(error), true)));
@@ -856,7 +925,7 @@
   $('selectVisible').addEventListener('click', () => { visibleEntries().forEach(({ index }) => selected.add(index)); renderList(); });
   $('clear').addEventListener('click', () => { selected.clear(); renderList(); });
   $('collapse').addEventListener('click', () => { opened.clear(); renderList(); });
-  $('export').addEventListener('click', () => saveSelection(selected, $('name').value.trim() || `${current()?.name || '로어북'}_선택`));
+  $('export').addEventListener('click', () => saveSelection(selected, $('name').value.trim() || `${current()?.name || kindName()}_선택`));
 
   async function open() {
     if (loading || disposed) return;
@@ -865,8 +934,8 @@
     if (!disposed) await api.showContainer('fullscreen');
   }
   (async () => {
-    registrations.push(await api.registerSetting('로어북 다운로더', open, '📥', 'html'));
-    registrations.push(await api.registerButton({ name: '로어북 다운로더', icon: '📥', iconType: 'html', location: 'hamburger' }, open));
+    registrations.push(await api.registerSetting('로어북·정규식 다운로더', open, '📥', 'html'));
+    registrations.push(await api.registerButton({ name: '로어북·정규식 다운로더', icon: '📥', iconType: 'html', location: 'hamburger' }, open));
     await api.onUnload(async () => {
       disposed = true;
       for (const [url, timer] of urls) { clearTimeout(timer); URL.revokeObjectURL(url); }
