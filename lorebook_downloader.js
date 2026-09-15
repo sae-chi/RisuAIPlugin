@@ -1,7 +1,7 @@
 //@name lorebook_downloader
-//@display-name 로어북·정규식 다운로더
+//@display-name 로어북 다운로더
 //@api 3.0
-//@version 1.2.0
+//@version 1.2.1
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/lorebook_downloader.js
 
 // Standalone API v3 plugin. No network requests or database writes.
