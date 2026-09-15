@@ -111,6 +111,7 @@
     return raw;
   }
   let stopped=false, uiBusy=false, watchTimer=null, view=null;
+  let scrollSyncEnabled=true;
   async function current() {
     const ci=await R.getCurrentCharacterIndex(), hi=await R.getCurrentChatIndex();
     const char=await R.getCharacterFromIndex(ci), chat=await R.getChatFromIndex(ci,hi);
@@ -720,7 +721,31 @@
     try{await navigator.clipboard.writeText(input.value);notice('복사했습니다.');}
     catch{input.focus();input.select();notice('텍스트를 선택했습니다. Ctrl+C 또는 기기의 복사 기능을 사용하세요.');}
   }
-  async function openViewer(index) {
+  function bindScrollSync(original,translation) {
+    const pending=new WeakMap();
+    let lastSource=original;
+    function sync(source) {
+      if(!scrollSyncEnabled)return;
+      const range=source.scrollHeight-source.clientHeight;
+      if(range<=0)return;
+      const target=source===original?translation:original;
+      const ratio=Math.max(0,Math.min(1,source.scrollTop/range));
+      const next=ratio*Math.max(0,target.scrollHeight-target.clientHeight);
+      if(Math.abs(target.scrollTop-next)<1)return;
+      target.scrollTop=next;
+      // Ignore the resulting asynchronous scroll event, including browser rounding.
+      pending.set(target,target.scrollTop);
+    }
+    for(const input of [original,translation])input.addEventListener('scroll',()=>{
+      const expected=pending.get(input);
+      pending.delete(input);
+      if(expected!==undefined&&Math.abs(input.scrollTop-expected)<1)return;
+      lastSource=input;
+      sync(input);
+    },{passive:true});
+    return ()=>{pending.delete(original);pending.delete(translation);sync(lastSource);};
+  }
+  async function openViewer(index, searchQuery='') {
     await themeReady;
     const target=await current();view=null;
     const shell=layout(),bar=$('view-toolbar'),sel=el('select',{id:'messages','ariaLabel':'메시지 선택'});
@@ -730,7 +755,7 @@
       if(m.role!=='char')return;indices.push(i);
       sel.append(el('option',{value:String(i),textContent:'#'+(i+1)}));
     });
-    const move=async delta=>{if(!canLeave())return;const pos=indices.indexOf(Number(sel.value));const next=indices[pos+delta];if(next!==undefined)await openViewer(next);};
+    const move=async delta=>{if(!canLeave())return;const pos=indices.indexOf(Number(sel.value));const next=indices[pos+delta];if(next!==undefined)await openViewer(next,$('search-query')?.value||'');};
     $('sidebar-controls').append(sel);
     bar.prepend(button('← 이전',()=>move(-1)),button('다음 →',()=>move(1)),button('새로고침',async()=>{if(canLeave())await openViewer(Number(sel.value));}));
     sel.addEventListener('change',()=>{const i=Number(sel.value);if(canLeave())openViewer(i).catch(e=>notice(e.message,true));else sel.value=String(view.snap.index);});
@@ -740,6 +765,7 @@
     try{pair=splitMessage(target.chat.message[i].data||'');}catch(e){notice(e.message,true);await R.showContainer('fullscreen');return;}
     view={target,snap:snapshot(target.chat,i),pair};
     const search=el('div',{className:'toolbar searchbar'}),query=el('input',{id:'search-query',type:'search',placeholder:'현재 원문·번역문에서 검색',ariaLabel:'검색어'}),scope=el('select',{id:'search-scope',ariaLabel:'검색 범위'}),count=el('span',{id:'search-count',className:'small',role:'status'});
+    query.value=searchQuery;
     for(const [value,label]of [['both','원문 + 번역문'],['original','원문'],['translation','번역문']])scope.append(el('option',{value,textContent:label}));
     let matches=[],matchIndex=-1;
     function updateSearch(){matches=[];matchIndex=-1;for(const id of ['original','translation'])if(scope.value==='both'||scope.value===id)for(const m of findMatches($(id)?.value||'',query.value))matches.push({...m,id});count.textContent=query.value?(matches.length+'개 결과'):'검색어를 입력하세요';}
@@ -767,6 +793,20 @@
       });
     }
     shell.append(cols);updateSearch();
+    const resync=bindScrollSync($('original'),$('translation'));
+    const syncToggle=button('',()=>{
+      scrollSyncEnabled=!scrollSyncEnabled;
+      updateSyncToggle();
+      if(scrollSyncEnabled)resync();
+    });
+    function updateSyncToggle(){
+      syncToggle.textContent='스크롤 동기화 '+(scrollSyncEnabled?'켜짐':'꺼짐');
+      syncToggle.setAttribute('aria-label','스크롤 동기화');
+      syncToggle.setAttribute('aria-pressed',String(scrollSyncEnabled));
+      syncToggle.title='원문과 번역문을 전체 스크롤 범위의 같은 비율로 이동';
+    }
+    updateSyncToggle();
+    $('sidebar-controls').append(syncToggle);
     const advanced=el('details'),sumEl=el('summary',{textContent:'보호 데이터'});
     advanced.append(sumEl,el('p',{className:'small',textContent:pair.paired?'앞부분과 뒷부분을 편집한 뒤 변경 저장을 누르세요. 메모·상태 태그를 포함해 입력하며, GigaTrans 제어 태그는 자동으로 유지합니다.':'번역되지 않은 메시지는 보호 영역을 구별할 수 없습니다. 원문에서 편집하세요.'}));
     const protectedCols=el('div',{className:'cols'}),pv=protectedValues(pair);
