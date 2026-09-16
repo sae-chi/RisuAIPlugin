@@ -1,6 +1,6 @@
 //@name autopilot
 //@api 3.0
-//@version 1.7.0
+//@version 1.7.1
 //@display-name Autopilot
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/Autopilot.js
 
@@ -30,6 +30,8 @@
   const MAX_CONTEXT_MESSAGES = 10;
   const DEFAULT_CONTEXT_MESSAGES = 6;
   const COOLDOWN_MS = 800;
+  const MAX_RETRIES = 10;
+  const RETRY_DELAY_MS = 2000;
 
   const state = {
     running: false,
@@ -37,6 +39,7 @@
     sessionToken: 0,
     mode: MODE_FIXED,
     targetTurns: DEFAULT_TURNS,
+    retryCount: 0,
     message: DEFAULT_MESSAGE,
     instructions: DEFAULT_INSTRUCTIONS,
     contextMessageLimit: DEFAULT_CONTEXT_MESSAGES,
@@ -65,6 +68,11 @@
     const number = Number.parseInt(String(value), 10);
     if (!Number.isFinite(number)) return DEFAULT_TURNS;
     return Math.min(MAX_TURNS, Math.max(MIN_TURNS, number));
+  }
+
+  function clampRetryCount(value) {
+    const number = Number.parseInt(String(value), 10);
+    return Number.isFinite(number) ? Math.min(MAX_RETRIES, Math.max(0, number)) : 0;
   }
 
   function clampContextMessageCount(value) {
@@ -223,6 +231,8 @@
   }
 
   function syncFormStateFromDOM() {
+    const retryInput = document.getElementById('autopilot-retries');
+    if (retryInput) state.retryCount = clampRetryCount(retryInput.value);
     const turnInput = document.getElementById('autopilot-turns');
     const messageInput = document.getElementById('autopilot-message');
     const instructionsInput = document.getElementById('autopilot-instructions');
@@ -247,6 +257,7 @@
       if (!raw) return;
       const parsed = JSON.parse(raw);
       state.targetTurns = clampTurnCount(parsed?.turns);
+      state.retryCount = clampRetryCount(parsed?.retries);
       state.contextMessageLimit = clampContextMessageCount(parsed?.contextMessages);
       state.mode = parsed?.mode === MODE_GENERATED ? MODE_GENERATED : MODE_FIXED;
       if (typeof parsed?.message === 'string' && parsed.message.trim()) {
@@ -265,6 +276,7 @@
     try {
       await api.pluginStorage.setItem(STORAGE_KEY, JSON.stringify({
         turns: state.targetTurns,
+        retries: state.retryCount,
         mode: state.mode,
         message: state.message,
         instructions: state.instructions,
@@ -692,6 +704,7 @@
       case 'permission': return '권한 확인 중';
       case 'generating': return '사용자 응답 생성 중';
       case 'sending': return '응답 및 후처리 대기 중';
+      case 'retrying': return '오류 재시도 대기 중';
       case 'cooldown': return '다음 턴 준비 중';
       case 'stopping': return '중지 대기 중';
       case 'completed': return '완료';
@@ -849,9 +862,18 @@
         <input id="autopilot-turns" type="number" min="${MIN_TURNS}" max="${MAX_TURNS}" step="1" value="${state.targetTurns}">
       </div>
 
+      <div class="field">
+        <label for="autopilot-retries">
+          오류 시 재시도 횟수
+          <span class="hint">0–${MAX_RETRIES}회 · 0회는 사용 안 함</span>
+        </label>
+        <input id="autopilot-retries" type="number" min="0" max="${MAX_RETRIES}" step="1" value="${state.retryCount}">
+        <p class="hint">모델 생성·전송 실패 시 2초 후 재시도합니다. 각 단계의 최초 요청에 추가되는 횟수입니다.</p>
+      </div>
+
       <p class="notice">${generatedMode
         ? '각 턴마다 RisuAI의 기타 보조모델이 최근 실제 대화와 마지막 캐릭터 응답을 바탕으로 사용자 메시지를 작성합니다. 첫 메시지만 있는 새 채팅에서는 시작할 수 없습니다.'
-        : '1턴은 메시지 1회 전송과 AI 응답의 전체 후처리 완료까지입니다. 오류 응답이나 응답 누락이 확인되면 즉시 중단됩니다.'}</p>
+        : '1턴은 메시지 1회 전송과 AI 응답의 전체 후처리 완료까지입니다. 오류 응답이나 응답 누락 시 설정한 횟수만큼 재시도한 뒤 중단됩니다.'}</p>
       ${state.error ? `<div class="error-box" role="alert">${escapeHTML(state.error)}</div>` : ''}
       ${state.phase === 'completed' || state.phase === 'stopped' ? renderProgress(progress) : ''}
       <div class="actions">
@@ -1152,6 +1174,67 @@
     return generatedTextFromResult(result);
   }
 
+  function checkRetrySession(token) {
+    if (token !== state.sessionToken || state.stopRequested) throw new Error('자동 진행이 중지되었습니다.');
+  }
+
+  async function withRetries(token, label, operation, prepareRetry) {
+    for (let attempt = 0; ; attempt += 1) {
+      checkRetrySession(token);
+      try {
+        return await operation();
+      } catch (error) {
+        checkRetrySession(token);
+        if (error.noRetry || attempt >= state.retryCount) throw error;
+        state.phase = 'retrying';
+        state.status = label + ' 재시도 ' + (attempt + 1) + '/' + state.retryCount + ' · 2초 대기';
+        state.error = errorMessage(error);
+        render();
+        const deadline = Date.now() + RETRY_DELAY_MS;
+        while (Date.now() < deadline) {
+          checkRetrySession(token);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        checkRetrySession(token);
+        if (!await sameActiveChat()) throw new Error('재시도 전 캐릭터 또는 채팅이 변경되었습니다.');
+        await prepareRetry();
+        checkRetrySession(token);
+        state.phase = label === '보조모델' ? 'generating' : 'sending';
+        state.status = label + ' 재시도 ' + (attempt + 1) + '/' + state.retryCount;
+        state.error = '';
+        render();
+      }
+    }
+  }
+
+  async function prepareChatRetry(beforeChat, outgoingMessage) {
+    const chat = await api.getChatFromIndex(state.activeCharacterIndex, state.activeChatIndex);
+    if (!chat || !Array.isArray(chat.message) || chat.isStreaming) {
+      throw new Error('채팅 상태를 확인할 수 없거나 스트리밍 중이므로 재시도를 중단했습니다.');
+    }
+    const original = messagesOf(beforeChat);
+    const prefix = { ...chat, message: chat.message.slice(0, original.length) };
+    if (conversationSignature(prefix) !== conversationSignature(beforeChat)) {
+      throw new Error('기존 대화가 변경되어 재시도를 중단했습니다.');
+    }
+    const added = chat.message.slice(original.length);
+    // Remove only the failed attempt's own user message and empty/error responses.
+    const safe = added.length === 0 || (
+      added[0]?.role === 'user' && String(added[0].data || '') === outgoingMessage
+      && added.slice(1).every((message) => isCharacterMessage(message)
+        && (containsRisuError(message) || !String(message.data || '').trim()))
+    );
+    if (!safe) throw new Error('새 메시지가 남아 있어 중복 전송 방지를 위해 재시도를 중단했습니다.');
+    if (added.length) {
+      if (typeof api.setChatToIndex !== 'function') throw new Error('실패한 전송을 정리할 API가 없습니다.');
+      await api.setChatToIndex(state.activeCharacterIndex, state.activeChatIndex, { ...chat, message: chat.message.slice(0, original.length) });
+      const verified = await api.getChatFromIndex(state.activeCharacterIndex, state.activeChatIndex);
+      if (!verified || conversationSignature(verified) !== conversationSignature(beforeChat)) {
+        throw new Error('실패한 전송 정리를 확인하지 못했습니다.');
+      }
+    }
+  }
+
   async function runAutopilot(token) {
     while (state.completedTurns < state.targetTurns) {
       if (token !== state.sessionToken) return;
@@ -1202,9 +1285,17 @@
         render();
 
         try {
-          outgoingMessage = await generateNextUserMessage(beforeChat, source);
+          outgoingMessage = await withRetries(token, '보조모델',
+            () => generateNextUserMessage(beforeChat, source),
+            async () => {
+              const current = await api.getChatFromIndex(state.activeCharacterIndex, state.activeChatIndex);
+              if (!current || conversationSignature(current) !== signatureBeforeGeneration) {
+                throw new Error('보조모델 재시도 전 채팅 내용이 변경되었습니다.');
+              }
+            });
         } catch (error) {
           if (token !== state.sessionToken) return;
+          if (state.stopRequested) { finishStopped(); return; }
           await stopWithError('보조모델이 사용자 메시지를 생성하지 못했습니다.', errorMessage(error));
           return;
         }
@@ -1266,78 +1357,34 @@
         return;
       }
 
-      const before = snapshotChat(beforeChat);
-      const startedAt = Date.now();
-      state.phase = 'sending';
-      state.status = `${state.completedTurns + 1}번째 메시지를 전송하고 전체 후처리를 기다리는 중입니다.`;
-      state.error = '';
-      render();
-
-      let sendResult;
-      try {
-        sendResult = await api.sendChat(outgoingMessage);
-      } catch (error) {
-        await stopWithError('채팅 전송 중 예외가 발생했습니다.', errorMessage(error));
-        return;
-      }
-
-      if (token !== state.sessionToken) return;
-      if (sendResult === false) {
-        await stopWithError('RisuAI가 채팅 전송을 완료하지 못했습니다.');
-        return;
-      }
-
-      try {
-        activeChatMatches = await sameActiveChat();
-      } catch (error) {
-        await stopWithError('응답 후 현재 채팅을 확인하지 못했습니다.', errorMessage(error));
-        return;
-      }
-      if (!activeChatMatches) {
-        await stopWithError('응답 처리 중 캐릭터 또는 채팅이 변경되었습니다.');
-        return;
-      }
-
       let afterChat;
       try {
-        afterChat = await api.getChatFromIndex(
-          state.activeCharacterIndex,
-          state.activeChatIndex,
-        );
+        afterChat = await withRetries(token, '채팅 전송', async () => {
+          const before = snapshotChat(beforeChat);
+          const startedAt = Date.now();
+          state.phase = 'sending';
+          state.status = (state.completedTurns + 1) + '번째 메시지를 전송하고 전체 후처리를 기다리는 중입니다.';
+          render();
+          const sendResult = await api.sendChat(outgoingMessage);
+          checkRetrySession(token);
+          if (!await sameActiveChat()) {
+            throw Object.assign(new Error('응답 처리 중 캐릭터 또는 채팅이 변경되었습니다.'), { noRetry: true });
+          }
+          const chat = await api.getChatFromIndex(state.activeCharacterIndex, state.activeChatIndex);
+          if (!chat || !Array.isArray(chat.message)) throw new Error('응답 후 메시지 목록을 찾을 수 없습니다.');
+          if (chat.isStreaming) throw Object.assign(new Error('응답 스트리밍이 종료되지 않았습니다.'), { noRetry: true });
+          if (sendResult === false) throw new Error('RisuAI가 채팅 전송을 완료하지 못했습니다.');
+          const risuError = findNewRisuError(before, chat);
+          if (risuError) throw new Error('RisuAI 오류 응답이 생성되었습니다.\n' + String(risuError.data || ''));
+          const responses = findNewCharacterMessages(before, chat, startedAt);
+          if (!responses.length) throw new Error('새 AI 응답이 추가되지 않았습니다.');
+          if (!String(responses.at(-1)?.data || '').trim()) throw new Error('AI 응답이 비어 있습니다.');
+          return chat;
+        }, () => prepareChatRetry(beforeChat, outgoingMessage));
       } catch (error) {
-        await stopWithError('응답 후 채팅 상태를 읽지 못했습니다.', errorMessage(error));
-        return;
-      }
-      if (!afterChat || !Array.isArray(afterChat.message)) {
-        await stopWithError('응답 후 메시지 목록을 찾을 수 없습니다.');
-        return;
-      }
-      if (afterChat.isStreaming === true) {
-        await stopWithError('응답 스트리밍이 종료되지 않은 상태로 반환되었습니다.');
-        return;
-      }
-
-      const risuError = findNewRisuError(before, afterChat);
-      if (risuError) {
-        await stopWithError(
-          'RisuAI 오류 응답이 생성되었습니다.',
-          String(risuError.data || '').trim(),
-        );
-        return;
-      }
-
-      const newCharacterMessages = findNewCharacterMessages(before, afterChat, startedAt);
-      if (newCharacterMessages.length === 0) {
-        await stopWithError(
-          '새 AI 응답이 추가되지 않았습니다.',
-          '요청 취소, 모델 오류 또는 start 트리거에 의한 전송 중단일 수 있습니다.',
-        );
-        return;
-      }
-
-      const finalMessage = newCharacterMessages.at(-1);
-      if (!String(finalMessage?.data || '').trim()) {
-        await stopWithError('AI 응답이 비어 있어 자동 진행을 중단했습니다.');
+        if (token !== state.sessionToken) return;
+        if (state.stopRequested) { finishStopped(); return; }
+        await stopWithError('채팅 전송을 완료하지 못했습니다.', errorMessage(error));
         return;
       }
 
@@ -1512,6 +1559,7 @@
     document.body.addEventListener('input', (event) => {
       if (![
         'autopilot-turns',
+        'autopilot-retries',
         'autopilot-message',
         'autopilot-instructions',
         'autopilot-context-messages',
@@ -1523,11 +1571,14 @@
     document.body.addEventListener('change', (event) => {
       if (event.target.id === 'autopilot-turns') {
         event.target.value = String(clampTurnCount(event.target.value));
+      } else if (event.target.id === 'autopilot-retries') {
+        event.target.value = String(clampRetryCount(event.target.value));
       } else if (event.target.id === 'autopilot-context-messages') {
         event.target.value = String(clampContextMessageCount(event.target.value));
       }
       if ([
         'autopilot-turns',
+        'autopilot-retries',
         'autopilot-message',
         'autopilot-instructions',
         'autopilot-context-messages',
@@ -1538,7 +1589,7 @@
     document.addEventListener('keydown', async (event) => {
       if (event.key === 'Escape') await closeUI();
       if (event.key === 'Enter' && !state.running
-        && (event.target.id === 'autopilot-turns' || event.target.id === 'autopilot-context-messages')) {
+        && ['autopilot-turns', 'autopilot-context-messages', 'autopilot-retries'].includes(event.target.id)) {
         event.preventDefault();
         await startAutopilot();
       }
@@ -1566,7 +1617,7 @@
       if (chatButtonId) await api.unregisterUIPart(chatButtonId);
     });
 
-    console.log('[Autopilot] v1.7.0 loaded');
+    console.log('[Autopilot] v1.7.1 loaded');
   } catch (error) {
     console.error('[Autopilot] 초기화에 실패했습니다.', error);
   }

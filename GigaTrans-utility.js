@@ -1,7 +1,7 @@
 //@name gigatrans_utility
 //@display-name GigaTrans Utility
 //@api 3.0
-//@version 1.6.1
+//@version 1.6.3
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/GigaTrans-utility.js
 
 ;(async function () {
@@ -610,6 +610,16 @@
     }
     :root[data-theme="dark"] .editor{caret-color:var(--teal)}
 
+    .global-search-controls{flex-wrap:wrap}
+    .global-search-controls input{flex:1 1 240px;width:auto;min-width:0}
+    .global-search-controls select{flex:0 0 160px;width:160px;min-width:160px;font-size:14px}
+    @media(max-width:600px){
+      .global-search-controls input{flex-basis:100%;width:100%}
+      .global-search-controls select{flex:1 1 160px}
+    }
+    .global-results{overflow:auto;min-height:0;flex:1;display:flex;flex-direction:column;gap:8px}
+    .global-result{text-align:left;white-space:normal;display:flex;flex-direction:column;gap:4px;flex-shrink:0;padding:12px;overflow-wrap:anywhere}
+    .global-result mark{background:var(--light-teal);color:var(--ink)}
     @media(prefers-reduced-motion:reduce){*{transition:none!important}}
   `;
   const $=id=>document.getElementById(id);
@@ -666,7 +676,7 @@
       el('h1',{textContent:'GigaTrans Utility'})
     ]));
     const nav=el('nav',{className:'tabs',role:'tablist',ariaLabel:'GigaTrans 메뉴'});
-    for(const[id,label,fn]of [['editor','대조 · 편집',openViewer],['tokens','토큰 계산기',openCalculator]]) {
+    for(const[id,label,fn]of [['editor','대조 · 편집',openViewer],['search','전체 검색',openSearch],['tokens','토큰 계산기',openCalculator]]) {
       const tab=button(label,async()=>{if(id!==active&&canLeave())await fn();});
       tab.id='tab-'+id;
       tab.setAttribute('role','tab');
@@ -745,7 +755,7 @@
     },{passive:true});
     return ()=>{pending.delete(original);pending.delete(translation);sync(lastSource);};
   }
-  async function openViewer(index, searchQuery='') {
+  async function openViewer(index, searchQuery='', searchHit=null) {
     await themeReady;
     const target=await current();view=null;
     const shell=layout(),bar=$('view-toolbar'),sel=el('select',{id:'messages','ariaLabel':'메시지 선택'});
@@ -793,6 +803,8 @@
       });
     }
     shell.append(cols);updateSearch();
+    if(searchHit){scope.value=searchHit.area;updateSearch();matchIndex=matches.findIndex(m=>m.start===searchHit.start)-1;moveMatch(1);}
+    if(chatSearch)bar.prepend(button('검색 결과로',async()=>{if(canLeave())await openSearch();}));
     const resync=bindScrollSync($('original'),$('translation'));
     const syncToggle=button('',()=>{
       scrollSyncEnabled=!scrollSyncEnabled;
@@ -824,6 +836,75 @@
     notice(pair.legacy?'이전 Relay 형식: 알려진 보호 태그를 분리했습니다. 사용자 정의 앞부분은 번역문에 포함될 수 있습니다.':pair.paired?'':'아직 번역되지 않은 메시지입니다.');
     await R.showContainer('fullscreen');
   }
+
+  let chatSearch=null;
+  function searchChat(chat,query,scope='both') {
+    const hits=[];let skipped=0;
+    if(!query)return {hits,skipped};
+    (chat.message||[]).forEach((message,index)=>{
+      if(message.role!=='char')return;
+      try {
+        const pair=splitMessage(message.data||'');
+        for(const area of ['original','translation']) {
+          if(scope!=='both'&&scope!==area)continue;
+          const text=pair[area];
+          for(const match of findMatches(text,query))hits.push({index,area,...match,text,snap:snapshot(chat,index)});
+        }
+      }catch{skipped++;}
+    });
+    return {hits,skipped};
+  }
+  async function openSearch() {
+    await themeReady;
+    const target=await current();
+    const old=chatSearch;
+    const same=old&&old.target.ci===target.ci&&old.target.hi===target.hi&&old.target.charId===target.charId&&old.target.chatId===target.chatId&&old.target.chat.name===target.chat.name;
+    if(!same)chatSearch={target,query:'',scope:'both',scroll:0,limit:100};
+    const state=chatSearch;state.target=target;view=null;
+    const shell=layout('search');
+    shell.append(el('p',{className:'small',textContent:(target.char.name||'캐릭터')+' / '+(target.chat.name||'채팅')+' · 저장된 캐릭터 메시지 전체 검색'}));
+    const query=el('input',{type:'search',value:state.query,placeholder:'전체 메시지에서 검색',ariaLabel:'전체 검색어'});
+    const scope=el('select',{ariaLabel:'검색 대상'});
+    for(const [value,label]of [['both','원문 + 번역문'],['original','원문'],['translation','번역문']])scope.append(el('option',{value,textContent:label}));
+    scope.value=state.scope;
+    const count=el('p',{className:'small',role:'status'});
+    const results=el('div',{className:'global-results'});
+    let timer=null;
+    function render() {
+      if(!results.isConnected)return;
+      const {hits,skipped}=searchChat(state.target.chat,state.query,state.scope);
+      results.replaceChildren();
+      count.textContent=state.query?hits.length+'개 결과 · '+new Set(hits.map(h=>h.index)).size+'개 메시지'+(skipped?' · 태그 손상 '+skipped+'개 제외':''):'검색어를 입력하세요.';
+      for(const hit of hits.slice(0,state.limit)) {
+        const item=button('',async()=>{
+          if(!canLeave())return;
+          state.scroll=results.scrollTop;
+          const selected=await current();
+          if(selected.ci!==state.target.ci||selected.hi!==state.target.hi||selected.charId!==state.target.charId||selected.chatId!==state.target.chatId)throw new Error('채팅이 바뀌었습니다. 전체 검색 탭을 다시 열어 주세요.');
+          const latest=await readTarget(state.target),index=locate(latest,hit.snap);
+          await openViewer(index,state.query,hit);
+        });
+        item.className='global-result';
+        item.append(el('strong',{textContent:'#'+(hit.index+1)+' · '+(hit.area==='original'?'원문':'번역문')}));
+        const snippet=el('span');
+        snippet.append(document.createTextNode((hit.start>70?'…':'')+hit.text.slice(Math.max(0,hit.start-70),hit.start)),el('mark',{textContent:hit.text.slice(hit.start,hit.end)}),document.createTextNode(hit.text.slice(hit.end,hit.end+100)+(hit.end+100<hit.text.length?'…':'')));
+        item.append(snippet);results.append(item);
+      }
+      if(hits.length>state.limit)results.append(button('결과 더 보기',()=>{const top=results.scrollTop;state.limit+=100;render();results.scrollTop=top;}));
+      if(state.query&&!hits.length)results.append(el('p',{textContent:'일치하는 결과가 없습니다.'}));
+    }
+    function update() {
+      state.query=query.value;state.scope=scope.value;state.limit=100;state.scroll=0;
+      clearTimeout(timer);timer=setTimeout(render,200);
+    }
+    query.addEventListener('input',update);scope.addEventListener('change',update);
+    query.addEventListener('keydown',e=>{if(e.key==='Enter'){clearTimeout(timer);render();}});
+    results.addEventListener('scroll',()=>{state.scroll=results.scrollTop;},{passive:true});
+    shell.append(el('div',{className:'toolbar global-search-controls'},[query,scope,button('새로고침',async()=>{state.target.chat=await readTarget(state.target);render();})]),count,results);
+    render();results.scrollTop=state.scroll;
+    await R.showContainer('fullscreen');
+  }
+
   async function openCalculator() {
     await themeReady;
     const preferred=view?.snap.index;
@@ -884,7 +965,7 @@
   }
   // Test seam is reachable only in the local VM harness; no Risu API is altered.
   if(typeof __GT_TEST__!=='undefined') {
-    Object.assign(__GT_TEST__,{splitMessage,replacePair,replaceAllAreas,protectedValues,findMatches,estimateTokens,estimateChat,locate,saveDraft,openViewer,openCalculator});
+    Object.assign(__GT_TEST__,{searchChat,splitMessage,replacePair,replaceAllAreas,protectedValues,findMatches,estimateTokens,estimateChat,locate,saveDraft,openViewer,openCalculator});
     return;
   }
   const registrations=[];
@@ -894,5 +975,5 @@
     for(const part of registrations)await R.unregisterUIPart(typeof part==='string'?part:part.id);
   });
   watchTimer=setTimeout(watch,2000);
-  console.log('[GigaTrans Utility] v1.6.0 준비 완료');
+  console.log('[GigaTrans Utility] v1.6.3 준비 완료');
 })().catch(e=>console.error('[GigaTrans Utility] 초기화 실패:',e.message));
