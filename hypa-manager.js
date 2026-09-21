@@ -1,7 +1,7 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.7.8
+//@version 1.8.0
 //@arg summary_prompt string Default summary prompt
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/hypa-manager.js
 
@@ -693,7 +693,7 @@
             '<div class="info-banner">RisuAI 설정에서 보조모델 분리를 켜고 memory 모델에 원하는 모델을 선택하세요. 분리가 꺼져 있거나 memory 모델이 비어 있으면 기본 보조모델을 사용합니다. 프로바이더 플러그인으로 설정한 모델도 사용할 수 있습니다.</div>' +
             '<div><div class="section-head"><div class="section-title">요약할 채팅 선택</div><div class="select-tools"><span class="hint" id="selection-hint">총 0개 선택</span><button class="mini-btn" id="btn-select-all" type="button">전체 선택</button><button class="mini-btn" id="btn-clear-all" type="button">전체 해제</button></div></div>' +
               '<div class="range-tools"><label for="range-start">시작 번호<input id="range-start" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: 0"></label><label for="range-end">끝 번호<input id="range-end" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: ' + Math.max(0, total - 1) + '"></label><button class="mini-btn" id="btn-select-range" type="button"' + (selectableTotal === 0 ? ' disabled' : '') + '>구간 선택</button></div>' +
-              '<div class="hint">아래 목록의 번호 기준(0부터 시작). 시작·끝을 모두 포함하며 시스템 메시지는 제외합니다. 구간 선택을 누르면 기존 선택이 해당 구간으로 바뀝니다. 선택 확인 후 요약 실행을 누르세요.</div><div id="range-msg" class="msg-status" role="status" aria-live="polite"></div>' +
+              '<div class="hint">아래 목록의 번호 기준(0부터 시작). 구간 선택을 누르면 기존 선택이 해당 구간으로 바뀝니다. 선택 확인 후 요약 실행을 누르세요.</div><div id="range-msg" class="msg-status" role="status" aria-live="polite"></div>' +
               '<div class="msg-preview">' + msgRows + '</div></div>' +
             '<div id="result-wrap" style="display:none"><div class="section-title">요약 결과</div><textarea class="result-editor" id="result-box"></textarea><div class="hint">저장 전에 요약문을 직접 수정할 수 있습니다. 저장하면 현재 채팅의 hypaV3 요약 목록에 추가됩니다.</div></div>' +
             '<div class="btn-row"><button class="btn btn-main" id="btn-run">요약 실행</button><button class="btn btn-alt" id="btn-inject" style="display:none">hypaV3에 추가</button></div><div id="spinner">memory 보조모델로 요약 중...</div><div class="msg-status" id="msg"></div>' +
