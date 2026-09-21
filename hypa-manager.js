@@ -1,7 +1,7 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.7.6
+//@version 1.7.8
 //@arg summary_prompt string Default summary prompt
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/hypa-manager.js
 
@@ -102,11 +102,12 @@
 
     async function getConfig() {
       const savedPrompt = (await Risuai.getArgument('summary_prompt') ?? '').trim()
-      const db = await Risuai.getDatabase(['seperateModelsForAxModels', 'seperateModels'])
-      const memoryModel = (db?.seperateModels?.memory ?? '').trim()
+      const db = await Risuai.getDatabase(['seperateModelsForAxModels', 'seperateModels', 'subModel'])
+      const memoryModel = (db?.seperateModelsForAxModels ? db?.seperateModels?.memory ?? '' : '').trim()
       return {
         prompt: savedPrompt,
         memoryModel,
+        modelLabel: memoryModel || db?.subModel || 'RisuAI 기본 보조모델',
         usesSeparateAuxModels: !!db?.seperateModelsForAxModels
       }
     }
@@ -263,31 +264,67 @@
 
     async function callMemoryModel(cfg, systemPrompt, userContent) {
       const messages = buildSummaryMessages(systemPrompt, userContent)
-      let content
+      if (summaryRequestActive) throw new Error('이미 요약 요청이 진행 중입니다.')
       summaryRequestActive = true
       try {
-        content = await Risuai.runLLMModel({
+        // Use RisuAI's shared model dispatch for all registered providers.
+        // Provider-specific API requests and response conversion belong to the provider plugin.
+        const content = await Risuai.runLLMModel({
           messages,
           staticModel: cfg.memoryModel || undefined,
           mode: 'memory',
           allowPlugins: true
         })
+        const text = stripThoughtTags(await readSummaryResponse(content))
+        if (!text) throw new Error('모델이 빈 요약을 반환했습니다. 모델 설정과 프롬프트를 확인해 주세요.')
+        return text
       } finally {
         summaryRequestActive = false
       }
-      if (content instanceof ReadableStream) {
-        const reader = content.getReader()
+    }
+
+    async function readSummaryResponse(content) {
+      if (content?.type === 'fail' || content?.success === false) {
+        const detail = extractModelText(content.result ?? content.content ?? content.error ?? '')
+        const hint = /plugin.*block|block.*plugin/i.test(detail)
+          ? ' 프로바이더 호출을 지원하는 RisuAI 버전인지 확인해 주세요.' : ''
+        throw new Error((detail || '모델 요청에 실패했습니다.') + hint)
+      }
+      const payload = content?.type === 'streaming' || content?.type === 'success' || content?.type === 'multiline'
+        ? content.result : content?.success === true ? content.content : content
+      if (payload && typeof payload.getReader === 'function') {
+        const reader = payload.getReader()
         const decoder = new TextDecoder()
         let text = ''
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          text += typeof value === 'string' ? value : decoder.decode(value, { stream: true })
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            if (typeof value === 'string') {
+              text += decoder.decode() + value
+            } else if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
+              text += decoder.decode(value, { stream: true })
+            } else if (value && typeof value['0'] === 'string') {
+              // RisuAI StreamResponseChunk contains the complete text so far, not a delta.
+              decoder.decode()
+              text = value['0']
+            } else {
+              throw new Error('지원하지 않는 요약 스트리밍 응답 형식입니다.')
+            }
+          }
+          return text + decoder.decode()
+        } catch (error) {
+          try { await reader.cancel() } catch {}
+          throw error
+        } finally {
+          reader.releaseLock()
         }
-        text += decoder.decode()
-        return text
       }
-      return extractModelText(content)
+      if (content?.type === 'streaming') throw new Error('요약 스트림을 읽을 수 없습니다. 프로바이더의 스트리밍을 끄거나 RisuAI를 업데이트해 주세요.')
+      if (content?.type === 'multiline' && Array.isArray(payload)) {
+        return payload.map(line => Array.isArray(line) ? String(line[1] ?? '') : extractModelText(line)).join('\n')
+      }
+      return extractModelText(payload)
     }
 
     async function injectSummary(summaryText, chatMemos = []) {
@@ -451,9 +488,7 @@
     function buildUI(messages, cfg, presets, slots, char) {
       const total = messages.length
       const selectableTotal = messages.filter(m => m.role !== 'system').length
-      const modelLabel = cfg.memoryModel
-        ? cfg.memoryModel
-        : 'memory 보조모델 미지정 - RisuAI 기본 memory 모드 사용'
+      const modelLabel = cfg.modelLabel
       const charName = char?.name || '캐릭터'
 
       const msgRows = total === 0
@@ -465,7 +500,7 @@
             const text = typeof m.data === 'string' ? m.data : (m.data?.[0] ?? '')
             const cls = isSystem ? 'msg-role-system' : (isUser ? 'msg-role-user' : 'msg-role-char')
             const disabled = isSystem ? ' disabled' : ''
-            return '<div class="msg-row' + (m.isFirstMessage ? ' first-message' : '') + '" data-idx="' + i + '" title="클릭해서 전문 보기">' +
+            return '<div class="msg-row' + (m.isFirstMessage ? ' first-message' : '') + '" data-idx="' + i + '" tabindex="0" aria-haspopup="dialog" title="클릭해서 전문 보기">' +
               '<input class="msg-check" type="checkbox" data-idx="' + i + '"' + disabled + '>' +
               '<span class="msg-idx">' + i + '</span>' +
               '<span class="' + cls + '">' + esc(role) + '</span>' +
@@ -475,69 +510,178 @@
 
       document.body.innerHTML =
         '<style>' +
-        '* { box-sizing: border-box; margin: 0; padding: 0; }' +
-        '* { scrollbar-width: thin; scrollbar-color: rgba(139,227,213,.45) rgba(255,255,255,.06); }' +
-        '*::-webkit-scrollbar { width: 9px; height: 9px; }' +
-        '*::-webkit-scrollbar-track { background: rgba(255,255,255,.04); border-radius: 999px; }' +
-        '*::-webkit-scrollbar-thumb { background: rgba(139,227,213,.34); border: 2px solid rgba(19,19,26,.95); border-radius: 999px; }' +
-        '*::-webkit-scrollbar-thumb:hover { background: rgba(139,227,213,.58); }' +
+        /* ── 리셋 & 스크롤바 ── */
+        '*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }' +
+        '* { scrollbar-width: thin; scrollbar-color: rgba(100,180,210,.25) transparent; }' +
+        '*::-webkit-scrollbar { width: 5px; height: 5px; }' +
+        '*::-webkit-scrollbar-track { background: transparent; }' +
+        '*::-webkit-scrollbar-thumb { background: rgba(100,180,210,.22); border-radius: 999px; }' +
+        '*::-webkit-scrollbar-thumb:hover { background: rgba(100,180,210,.45); }' +
         '*::-webkit-scrollbar-corner { background: transparent; }' +
+
+        /* ── CSS 변수 ── */
+        ':root {' +
+          '--c-bg: #12141c;' +
+          '--c-surface: #191b26;' +
+          '--c-surface2: #1e2130;' +
+          '--c-border: rgba(255,255,255,.08);' +
+          '--c-border-focus: rgba(96,180,210,.6);' +
+          '--c-text: #d4d8f0;' +
+          '--c-text-dim: #6a7a99;' +
+          '--c-text-muted: #424d66;' +
+          '--c-accent: #4ab8d0;' +
+          '--c-accent-dim: rgba(74,184,208,.1);' +
+          '--c-accent-border: rgba(74,184,208,.25);' +
+          '--c-user: #6fa8e8;' +
+          '--c-char: #82c9a0;' +
+          '--c-danger: #e07070;' +
+          '--c-danger-bg: rgba(200,70,70,.18);' +
+          '--c-success: #5ec9a0;' +
+          '--radius-sm: 7px;' +
+          '--radius-md: 10px;' +
+          '--radius-lg: 14px;' +
+          '--shadow-panel: 0 32px 80px rgba(0,0,0,.85), 0 0 0 1px rgba(74,184,208,.05) inset;' +
+        '}' +
+
+        /* ── 기본 레이아웃 ── */
         'html, body { width: 100%; height: 100%; background: transparent; }' +
-        'body { font-family: system-ui, sans-serif; color: #f0f0f8; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.55); backdrop-filter: blur(6px); }' +
-        '.panel { background: #1c1c24; border: 1px solid rgba(255,255,255,.13); border-radius: 10px; padding: 24px; width: min(760px, 96vw); max-height: 94vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,0,0,.7); display: flex; flex-direction: column; gap: 18px; }' +
-        '.header { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }' +
-        'h2 { font-size: 20px; font-weight: 750; color: #fff; }' +
-        '.sub { font-size: 13px; color: #9fb9d5; margin-top: 5px; line-height: 1.45; }' +
-        '.badge { display: inline-block; max-width: 100%; background: rgba(36,128,118,.18); border: 1px solid rgba(56,189,170,.35); border-radius: 5px; padding: 3px 8px; color: #8be3d5; overflow-wrap: anywhere; }' +
-        '#btn-close { background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.15); color: #ddd; border-radius: 7px; padding: 8px 12px; font-size: 13px; cursor: pointer; flex-shrink: 0; }' +
-        '.tabs { display: flex; gap: 6px; border-bottom: 1px solid rgba(255,255,255,.1); overflow-x: auto; overflow-y: hidden; min-height: 38px; }' +
-        '.tab-btn { background: none; border: none; border-bottom: 2px solid transparent; color: #aab; font-size: 14px; padding: 9px 16px; cursor: pointer; margin-bottom: -1px; white-space: nowrap; }' +
-        '.tab-btn.active { color: #8be3d5; border-bottom-color: #8be3d5; }' +
-        '.tab-panel { display: none; flex-direction: column; gap: 14px; }' +
+        'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: var(--c-text); display: flex; align-items: center; justify-content: center; }' +
+
+        /* ── 패널 ── */
+        '.panel { background: var(--c-bg); border: 1px solid var(--c-border); border-radius: var(--radius-lg); padding: 26px 26px 22px; width: min(800px, 96vw); max-height: 92vh; overflow-y: auto; box-shadow: var(--shadow-panel); display: flex; flex-direction: column; gap: 18px; }' +
+
+        /* ── 헤더 ── */
+        '.header { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-bottom: 1px solid var(--c-border); padding-bottom: 16px; }' +
+        '.header-left { display: flex; align-items: center; gap: 12px; }' +
+        '.header-icon { width: 34px; height: 34px; background: var(--c-accent-dim); border: 1px solid var(--c-accent-border); border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }' +
+        'h2 { font-size: 16px; font-weight: 650; color: #e8eaf8; letter-spacing: -.015em; line-height: 1.2; }' +
+        '.sub { font-size: 11.5px; color: var(--c-text-dim); margin-top: 3px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }' +
+        '.badge { display: inline-flex; align-items: center; background: var(--c-accent-dim); border: 1px solid var(--c-accent-border); border-radius: 5px; padding: 1px 7px; color: var(--c-accent); font-size: 11px; font-weight: 500; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+        '.sub-dot { color: var(--c-text-muted); }' +
+        '#btn-close { background: transparent; border: 1px solid var(--c-border); color: var(--c-text-dim); border-radius: var(--radius-sm); padding: 6px 12px; font-size: 12.5px; cursor: pointer; flex-shrink: 0; transition: border-color .15s, color .15s, background .15s; }' +
+        '#btn-close:hover { border-color: rgba(255,255,255,.18); color: #ccd; background: rgba(255,255,255,.05); }' +
+
+        /* ── 탭 ── */
+        '.tabs { display: flex; gap: 1px; border-bottom: 1px solid var(--c-border); overflow-x: auto; overflow-y: hidden; }' +
+        '.tab-btn { background: none; border: none; border-bottom: 2px solid transparent; color: var(--c-text-dim); font-size: 13px; font-weight: 500; padding: 8px 16px; cursor: pointer; white-space: nowrap; transition: color .15s, border-color .15s; flex-shrink: 0; margin-bottom: -1px; font-family: inherit; }' +
+        '.tab-btn:hover { color: #a8bcd4; }' +
+        '.tab-btn.active { color: var(--c-accent); border-bottom-color: var(--c-accent); font-weight: 600; }' +
+        '.tab-panel { display: none; flex-direction: column; gap: 14px; padding-top: 2px; }' +
         '.tab-panel.active { display: flex; }' +
+
+        /* ── 섹션 헤더 ── */
         '.section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }' +
-        '.section-title { font-size: 12px; color: #8be3d5; text-transform: uppercase; letter-spacing: .06em; }' +
-        '.select-tools { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }' +
-        '.mini-btn { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14); color: #ccd; border-radius: 7px; padding: 7px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }' +
-        '.mini-btn.danger { background: #884545; color: #fff; }' +
-        '.msg-preview { background: #13131a; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; max-height: 380px; overflow-y: auto; }' +
-        '.msg-row { display: grid; grid-template-columns: 20px 34px minmax(62px, auto) 1fr; align-items: start; gap: 10px; padding: 11px 12px; border-bottom: 1px solid rgba(255,255,255,.05); font-size: 13px; cursor: pointer; }' +
+        '.section-title { font-size: 11px; font-weight: 600; color: var(--c-accent); letter-spacing: .06em; }' +
+        '.select-tools { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }' +
+
+        /* ── 범위 선택 ── */
+        '.range-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; padding: 12px 14px; background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-md); }' +
+        '.range-tools label { flex: 1 1 100px; min-width: 0; color: var(--c-text-dim); font-size: 11.5px; font-weight: 500; }' +
+        '.range-tools label input { display: block; margin-top: 5px; }' +
+
+        /* ── 미니 버튼 ── */
+        '.mini-btn { background: var(--c-surface2); border: 1px solid var(--c-border); color: #99aec8; border-radius: var(--radius-sm); padding: 5px 10px; font-size: 11.5px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, color .15s; font-family: inherit; }' +
+        '.mini-btn:hover { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.16); color: #ccdbe8; }' +
+        '.mini-btn.danger { background: var(--c-danger-bg); border-color: rgba(200,80,80,.28); color: var(--c-danger); }' +
+        '.mini-btn.danger:hover { background: rgba(200,70,70,.3); color: #f4a0a0; }' +
+        '.mini-btn:disabled { opacity: .35; cursor: not-allowed; }' +
+
+        /* ── 메시지 목록 ── */
+        '.msg-preview { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-md); max-height: 340px; overflow-y: auto; }' +
+        '.msg-row { display: grid; grid-template-columns: 18px 34px minmax(60px, auto) 1fr; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid rgba(255,255,255,.04); font-size: 13px; cursor: pointer; transition: background .1s; }' +
         '.msg-row:last-child { border-bottom: none; }' +
-        '.msg-row.selected { background: rgba(56,189,170,.1); }' +
-        '.msg-row.first-message { border-left: 3px solid #8be3d5; }' +
-        '.msg-check { width: 15px; height: 15px; accent-color: #38bdaa; align-self: center; }' +
-        '.msg-idx { color: #667; min-width: 30px; font-size: 12px; flex-shrink: 0; }' +
-        '.msg-role-user { color: #9ac1ff; min-width: 58px; flex-shrink: 0; font-size: 12px; }' +
-        '.msg-role-char { color: #abe0a4; min-width: 58px; flex-shrink: 0; font-size: 12px; }' +
-        '.msg-role-system { color: #888; min-width: 58px; flex-shrink: 0; font-size: 12px; }' +
-        '.msg-text { color: #d4d4df; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; line-height: 1.6; }' +
-        '.msg-row.expanded .msg-text { white-space: pre-wrap; word-break: break-word; overflow: visible; }' +
-        '.empty { padding: 18px; color: #889; font-size: 13px; text-align: center; }' +
-        '.btn-row { display: flex; align-items: center; gap: 10px; }' +
-        '.preset-picker { display: grid; grid-template-columns: 1fr; gap: 10px; }' +
-        '.preset-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }' +
-        'input, select, textarea { width: 100%; background: #111118; border: 1px solid rgba(255,255,255,.2); border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #f0f0f8; outline: none; font-family: system-ui, sans-serif; }' +
-        'textarea { resize: vertical; min-height: 170px; line-height: 1.6; }' +
-        'input:focus, select:focus, textarea:focus { border-color: rgba(56,189,170,.8); }' +
-        '.hint { font-size: 12px; color: #889; line-height: 1.5; }' +
-        '.result-box, .desc-box { background: #13131a; border: 1px solid rgba(255,255,255,.1); border-radius: 8px; padding: 14px; font-size: 14px; color: #e0e0f0; line-height: 1.7; white-space: pre-wrap; max-height: 260px; overflow-y: auto; }' +
-        'textarea.result-editor { min-height: 180px; max-height: 320px; background: #13131a; line-height: 1.7; }' +
-        '.btn { padding: 12px 14px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 650; color: #fff; min-width: 0; white-space: nowrap; }' +
+        '.msg-row:hover { background: rgba(255,255,255,.025); }' +
+        '.msg-row.selected { background: rgba(74,184,208,.07); }' +
+        '.msg-row.selected:hover { background: rgba(74,184,208,.12); }' +
+        '.msg-row.first-message { border-left: 2px solid rgba(74,184,208,.5); }' +
+        '.msg-check { width: 14px; height: 14px; accent-color: var(--c-accent); align-self: center; cursor: pointer; }' +
+        '.msg-idx { color: var(--c-text-muted); font-size: 11px; flex-shrink: 0; font-variant-numeric: tabular-nums; }' +
+        '.msg-role-user { color: var(--c-user); font-size: 11.5px; font-weight: 600; flex-shrink: 0; }' +
+        '.msg-role-char { color: var(--c-char); font-size: 11.5px; font-weight: 600; flex-shrink: 0; }' +
+        '.msg-role-system { color: var(--c-text-muted); font-size: 11.5px; flex-shrink: 0; }' +
+        '.msg-text { color: #a8b0cc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; line-height: 1.5; }' +
+        '.msg-row:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }' +
+        '#message-dialog { margin: auto; width: min(760px, 94vw); max-height: 86vh; padding: 0; background: var(--c-bg); color: var(--c-text); border: 1px solid var(--c-accent-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-panel); }' +
+        '#message-dialog[open] { display: flex; flex-direction: column; }' +
+        '#message-dialog::backdrop { background: transparent; }' +
+        '.message-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--c-border); flex-shrink: 0; }' +
+        '#message-dialog-title { min-width: 0; overflow-wrap: anywhere; }' +
+        '#message-dialog-close { flex-shrink: 0; }' +
+        '#message-dialog-content { padding: 20px; overflow-y: auto; min-height: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.75; }' +
+        '.empty { padding: 28px 16px; color: var(--c-text-muted); font-size: 13px; text-align: center; }' +
+
+        /* ── 버튼 행 ── */
+        '.btn-row { display: flex; align-items: center; gap: 8px; }' +
+
+        /* ── 프리셋 ── */
+        '.preset-picker { display: grid; grid-template-columns: 1fr; gap: 9px; }' +
+        '.preset-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }' +
+
+        /* ── 폼 요소 ── */
+        'input[type="text"], input[type="number"], select, textarea { width: 100%; background: var(--c-surface); border: 1px solid rgba(255,255,255,.1); border-radius: var(--radius-sm); padding: 9px 12px; font-size: 13px; color: #dde0f4; outline: none; font-family: inherit; transition: border-color .15s, box-shadow .15s; }' +
+        'input[type="text"]::placeholder, input[type="number"]::placeholder, textarea::placeholder { color: var(--c-text-muted); }' +
+        'textarea { resize: vertical; min-height: 160px; line-height: 1.65; }' +
+        'select { cursor: pointer; }' +
+        'input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:focus { border-color: var(--c-border-focus); box-shadow: 0 0 0 3px rgba(74,184,208,.08); }' +
+
+        /* ── 힌트 ── */
+        '.hint { font-size: 11.5px; color: var(--c-text-dim); line-height: 1.65; }' +
+
+        /* ── 결과 박스 ── */
+        '.result-box, .desc-box { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-md); padding: 13px 15px; font-size: 13px; color: var(--c-text); line-height: 1.75; white-space: pre-wrap; max-height: 240px; overflow-y: auto; }' +
+        'textarea.result-editor { min-height: 160px; max-height: 280px; background: var(--c-surface); border-color: rgba(255,255,255,.1); line-height: 1.7; }' +
+
+        /* ── 메인 버튼 ── */
+        '.btn { padding: 10px 16px; border: none; border-radius: var(--radius-sm); font-size: 13px; cursor: pointer; font-weight: 600; color: #fff; min-width: 0; white-space: nowrap; transition: opacity .15s, filter .15s; font-family: inherit; letter-spacing: -.01em; }' +
         '.btn-row .btn { flex: 1; }' +
-        '.btn:disabled { opacity: .45; cursor: not-allowed; }' +
-        '.btn-main { background: #247f76; } .btn-alt { background: #315a94; } .btn-danger { background: #884545; } .btn-muted { background: #3a3a46; }' +
-        '.slot-save { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; }' +
-        '.slot-row { background: #13131a; border: 1px solid rgba(255,255,255,.11); border-radius: 8px; padding: 12px; display: flex; justify-content: space-between; gap: 12px; align-items: center; }' +
-        '.slot-info { min-width: 0; } .slot-name { display: block; font-weight: 650; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .slot-ts { display: block; margin-top: 3px; font-size: 12px; color: #99a; }' +
-        '.slot-actions { display: flex; gap: 7px; flex-shrink: 0; } #slot-list { display: flex; flex-direction: column; gap: 8px; }' +
+        '.btn:not(:disabled):hover { filter: brightness(1.12) saturate(1.08); }' +
+        '.btn:disabled { opacity: .35; cursor: not-allowed; }' +
+        '.btn-main { background: linear-gradient(135deg, #1d8fa8 0%, #166e84 100%); }' +
+        '.btn-alt { background: linear-gradient(135deg, #2a5298 0%, #1e3e78 100%); }' +
+        '.btn-danger { background: linear-gradient(135deg, #803232 0%, #632828 100%); }' +
+        '.btn-muted { background: var(--c-surface2); border: 1px solid var(--c-border); color: #a8b8cc; }' +
+        '.btn-muted:not(:disabled):hover { background: rgba(255,255,255,.12); color: #ccd; }' +
+
+        /* ── 슬롯 ── */
+        '.slot-save { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; }' +
+        '#slot-list { display: flex; flex-direction: column; gap: 6px; }' +
+        '.slot-row { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-md); padding: 11px 14px; display: flex; justify-content: space-between; gap: 12px; align-items: center; transition: border-color .15s; }' +
+        '.slot-row:hover { border-color: rgba(255,255,255,.14); background: var(--c-surface2); }' +
+        '.slot-info { min-width: 0; }' +
+        '.slot-name { display: block; font-weight: 600; font-size: 13px; color: #e0e4f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+        '.slot-ts { display: block; margin-top: 2px; font-size: 11px; color: var(--c-text-dim); }' +
+        '.slot-actions { display: flex; gap: 5px; flex-shrink: 0; }' +
+
+        /* ── 기타 ── */
         '#json-input { display: none; }' +
-        '#spinner { display: none; font-size: 13px; color: #8be3d5; text-align: center; padding: 4px 0; }' +
-        '.msg-status { font-size: 13px; min-height: 18px; text-align: center; }' +
-        '@media (max-width: 560px) { .section-head { align-items: flex-start; flex-direction: column; } .select-tools { justify-content: flex-start; } .btn-row, .slot-row { flex-wrap: wrap; } .btn-row .btn { flex-basis: calc(50% - 5px); } .preset-actions, .slot-save { grid-template-columns: 1fr; } .slot-actions { width: 100%; justify-content: flex-end; } .msg-row { grid-template-columns: 20px 30px 58px 1fr; } }' +
+        '#spinner { display: none; font-size: 12.5px; color: var(--c-accent); text-align: center; padding: 5px 0; }' +
+        '.msg-status { font-size: 12.5px; min-height: 18px; text-align: center; padding: 2px 0; transition: color .2s; }' +
+
+        /* ── 인포 배너 ── */
+        '.info-banner { background: var(--c-surface); border: 1px solid var(--c-border); border-left: 3px solid var(--c-accent-border); border-radius: var(--radius-sm); padding: 10px 13px; font-size: 12px; color: var(--c-text-dim); line-height: 1.6; }' +
+        '.split-card { background: var(--c-surface); border: 1px solid var(--c-border); border-radius: var(--radius-md); padding: 16px; display: flex; flex-direction: column; gap: 12px; }' +
+        '.split-card .desc-box { max-height: unset; font-size: 12.5px; color: var(--c-text-dim); background: transparent; border: none; padding: 0; }' +
+
+        /* ── 반응형 ── */
+        '@media (max-width: 560px) {' +
+          '.panel { padding: 18px 14px; gap: 14px; }' +
+          '.section-head { align-items: flex-start; flex-direction: column; }' +
+          '.select-tools { justify-content: flex-start; }' +
+          '.btn-row, .slot-row { flex-wrap: wrap; }' +
+          '.btn-row .btn { flex-basis: calc(50% - 4px); }' +
+          '.preset-actions, .slot-save { grid-template-columns: 1fr; }' +
+          '.slot-actions { width: 100%; justify-content: flex-end; }' +
+          '.msg-row { grid-template-columns: 16px 28px 54px 1fr; gap: 7px; }' +
+          '.tab-btn { font-size: 12px; padding: 7px 12px; }' +
+        '}' +
         '</style>' +
 
+        '<dialog id="message-dialog" aria-labelledby="message-dialog-title">' +
+          '<div class="message-dialog-header"><h2 id="message-dialog-title">메시지 전문</h2><button class="mini-btn" id="message-dialog-close" type="button" autofocus>닫기</button></div>' +
+          '<div id="message-dialog-content"></div>' +
+        '</dialog>' +
         '<div class="panel">' +
-          '<div class="header"><div><h2>Hypa Manager</h2><div class="sub"><span class="badge">' + esc(modelLabel) + '</span><br>' + esc(charName) + ' · 총 ' + total + '개 항목</div></div><button id="btn-close">닫기</button></div>' +
+          '<div class="header"><div class="header-left"><div class="header-icon">✨</div><div><h2>Hypa Manager</h2><div class="sub"><span class="badge">' + esc(modelLabel) + '</span><span class="sub-dot">·</span>' + esc(charName) + '<span class="sub-dot">·</span>' + total + '개 항목</div></div></div><button id="btn-close">닫기</button></div>' +
           '<div class="tabs">' +
             '<button class="tab-btn active" data-tab="tab-summarize">요약</button>' +
             '<button class="tab-btn" data-tab="tab-prompt">프롬프트</button>' +
@@ -546,8 +690,11 @@
           '</div>' +
 
           '<div id="tab-summarize" class="tab-panel active">' +
-            '<div class="hint">요약용 memory 보조모델은 프로바이더 플러그인 모델이 아니라 Risu 내장 모델로 설정해 주세요.</div>' +
-            '<div><div class="section-head"><div class="section-title">요약할 채팅 선택</div><div class="select-tools"><span class="hint" id="selection-hint">총 0개 선택</span><button class="mini-btn" id="btn-select-all" type="button">전체 선택</button><button class="mini-btn" id="btn-clear-all" type="button">전체 해제</button></div></div><div class="msg-preview">' + msgRows + '</div></div>' +
+            '<div class="info-banner">RisuAI 설정에서 보조모델 분리를 켜고 memory 모델에 원하는 모델을 선택하세요. 분리가 꺼져 있거나 memory 모델이 비어 있으면 기본 보조모델을 사용합니다. 프로바이더 플러그인으로 설정한 모델도 사용할 수 있습니다.</div>' +
+            '<div><div class="section-head"><div class="section-title">요약할 채팅 선택</div><div class="select-tools"><span class="hint" id="selection-hint">총 0개 선택</span><button class="mini-btn" id="btn-select-all" type="button">전체 선택</button><button class="mini-btn" id="btn-clear-all" type="button">전체 해제</button></div></div>' +
+              '<div class="range-tools"><label for="range-start">시작 번호<input id="range-start" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: 0"></label><label for="range-end">끝 번호<input id="range-end" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: ' + Math.max(0, total - 1) + '"></label><button class="mini-btn" id="btn-select-range" type="button"' + (selectableTotal === 0 ? ' disabled' : '') + '>구간 선택</button></div>' +
+              '<div class="hint">아래 목록의 번호 기준(0부터 시작). 시작·끝을 모두 포함하며 시스템 메시지는 제외합니다. 구간 선택을 누르면 기존 선택이 해당 구간으로 바뀝니다. 선택 확인 후 요약 실행을 누르세요.</div><div id="range-msg" class="msg-status" role="status" aria-live="polite"></div>' +
+              '<div class="msg-preview">' + msgRows + '</div></div>' +
             '<div id="result-wrap" style="display:none"><div class="section-title">요약 결과</div><textarea class="result-editor" id="result-box"></textarea><div class="hint">저장 전에 요약문을 직접 수정할 수 있습니다. 저장하면 현재 채팅의 hypaV3 요약 목록에 추가됩니다.</div></div>' +
             '<div class="btn-row"><button class="btn btn-main" id="btn-run">요약 실행</button><button class="btn btn-alt" id="btn-inject" style="display:none">hypaV3에 추가</button></div><div id="spinner">memory 보조모델로 요약 중...</div><div class="msg-status" id="msg"></div>' +
           '</div>' +
@@ -565,8 +712,12 @@
           '</div>' +
 
           '<div id="tab-split" class="tab-panel">' +
-            '<div class="desc-box">현재 채팅의 hypaV3 마지막 요약 지점을 기준으로 원본 백업, 요약 채팅, 비요약 채팅을 새로 만듭니다. 고아 메모리 보존 옵션을 켜야 합니다.</div>' +
-            '<button class="btn btn-alt" id="btn-split-chat" type="button">챗 분할 실행</button><div class="hint">생성된 채팅은 채팅 목록 맨 앞에 추가됩니다.</div><div class="msg-status" id="split-msg"></div>' +
+            '<div class="split-card">' +
+              '<div class="desc-box">현재 채팅의 hypaV3 마지막 요약 지점을 기준으로 원본 백업, 요약 채팅, 비요약 채팅을 새로 만듭니다. 고아 메모리 보존 옵션을 켜야 합니다.</div>' +
+              '<div><button class="btn btn-alt" id="btn-split-chat" type="button">챗 분할 실행</button></div>' +
+              '<div class="hint">생성된 채팅은 채팅 목록 맨 앞에 추가됩니다.</div>' +
+            '</div>' +
+            '<div class="msg-status" id="split-msg"></div>' +
           '</div>' +
         '</div>'
     }
@@ -657,10 +808,33 @@
         input.addEventListener('click', event => event.stopPropagation())
         input.addEventListener('change', updateSelectionState)
       })
+      const messageDialog = document.getElementById('message-dialog')
+      document.getElementById('message-dialog-close').addEventListener('click', () => messageDialog.close())
+      messageDialog.addEventListener('click', event => {
+        if (event.target !== messageDialog) return
+        const rect = messageDialog.getBoundingClientRect()
+        if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
+          messageDialog.close()
+        }
+      })
+      function openMessageDialog(row) {
+        const role = row.querySelector('.msg-role-system, .msg-role-user, .msg-role-char').textContent
+        document.getElementById('message-dialog-title').textContent = '#' + row.dataset.idx + ' · ' + role
+        const content = document.getElementById('message-dialog-content')
+        content.textContent = row.querySelector('.msg-text').textContent
+        messageDialog.showModal()
+        content.scrollTop = 0
+      }
       document.querySelectorAll('.msg-row').forEach(row => {
         row.addEventListener('click', event => {
           if (event.target?.classList?.contains('msg-check')) return
-          row.classList.toggle('expanded')
+          openMessageDialog(row)
+        })
+        row.addEventListener('keydown', event => {
+          if (event.target === row && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault()
+            openMessageDialog(row)
+          }
         })
       })
       document.getElementById('btn-select-all').addEventListener('click', () => {
@@ -672,6 +846,47 @@
         updateSelectionState()
       })
       updateSelectionState()
+
+      function selectMessageRange() {
+        const startValue = document.getElementById('range-start').value.trim()
+        const endValue = document.getElementById('range-end').value.trim()
+        const start = Number(startValue)
+        const end = Number(endValue)
+        if (!startValue || !endValue || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)) {
+          showMsg('range-msg', '시작 번호와 끝 번호를 정수로 입력해 주세요.', true)
+          return
+        }
+        if (total === 0) {
+          showMsg('range-msg', '메시지가 없습니다.', true)
+          return
+        }
+        if (start < 0 || end < 0 || start >= total || end >= total) {
+          showMsg('range-msg', '메시지 번호는 0부터 ' + (total - 1) + '까지 입력해 주세요.', true)
+          return
+        }
+        if (start > end) {
+          showMsg('range-msg', '시작 번호는 끝 번호보다 클 수 없습니다.', true)
+          return
+        }
+        if (!messages.slice(start, end + 1).some(message => message.role !== 'system')) {
+          showMsg('range-msg', '해당 구간에는 요약할 메시지가 없습니다.', true)
+          return
+        }
+        document.querySelectorAll('.msg-check').forEach(input => {
+          const index = Number(input.dataset.idx)
+          input.checked = !input.disabled && index >= start && index <= end
+        })
+        updateSelectionState()
+        showMsg('range-msg', '', false)
+      }
+      document.getElementById('btn-select-range').addEventListener('click', selectMessageRange)
+      ;['range-start', 'range-end'].forEach(id => {
+        document.getElementById(id).addEventListener('keydown', event => {
+          if (event.key !== 'Enter' || event.isComposing) return
+          event.preventDefault()
+          selectMessageRange()
+        })
+      })
 
       function refreshPresetSelect(selectedIndex) {
         const select = document.getElementById('preset-select')
@@ -876,7 +1091,7 @@
       }
     )
 
-    console.log('[Hypa Manager] Plugin loaded v1.7.6')
+    console.log('[Hypa Manager] Plugin loaded v1.7.8')
   } catch (error) {
     console.log('[Hypa Manager] Error: ' + error.message)
   }
