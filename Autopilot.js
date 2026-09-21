@@ -1,6 +1,6 @@
 //@name autopilot
 //@api 3.0
-//@version 1.7.1
+//@version 1.7.2
 //@display-name Autopilot
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/Autopilot.js
 
@@ -872,9 +872,11 @@
       </div>
 
       <p class="notice">${generatedMode
-        ? '각 턴마다 RisuAI의 기타 보조모델이 최근 실제 대화와 마지막 캐릭터 응답을 바탕으로 사용자 메시지를 작성합니다. 첫 메시지만 있는 새 채팅에서는 시작할 수 없습니다.'
+        ? '각 턴마다 RisuAI의 보조모델이 최근 실제 대화와 마지막 캐릭터 응답을 바탕으로 사용자 메시지를 작성합니다. 첫 메시지만 있는 새 채팅에서는 시작할 수 없습니다.'
         : '1턴은 메시지 1회 전송과 AI 응답의 전체 후처리 완료까지입니다. 오류 응답이나 응답 누락 시 설정한 횟수만큼 재시도한 뒤 중단됩니다.'}</p>
       ${state.error ? `<div class="error-box" role="alert">${escapeHTML(state.error)}</div>` : ''}
+      <p class="notice">메인 모델은 RisuAI 내장 모델로 설정하세요. 메인 모델에 프로바이더 플러그인을 사용하면 RisuAI의 자동 전송 제한으로 진행되지 않을 수 있습니다.</p>
+      ${generatedMode ? '<p class="notice">사용자 메시지를 작성하는 기타 보조모델(otherAx)은 RisuAI 표준 프로바이더 플러그인을 지원합니다.</p>' : ''}
       ${state.phase === 'completed' || state.phase === 'stopped' ? renderProgress(progress) : ''}
       <div class="actions">
         <button class="button primary" type="button" data-action="start" ${generatedDisabled ? 'disabled' : ''}>
@@ -1142,20 +1144,54 @@
     ];
   }
 
-  function generatedTextFromResult(result) {
-    if (result?.type === 'fail') {
-      throw new Error(String(result.result || '보조모델 요청이 실패했습니다.'));
+  async function generatedTextFromResult(result) {
+    if (result?.type === 'fail' || result?.success === false) {
+      throw new Error(String(result.result || result.content || '보조모델 요청이 실패했습니다.'));
     }
-    if (result?.type && result.type !== 'success') {
+    if (result?.type && !['success', 'streaming', 'multiline'].includes(result.type)) {
       throw new Error(`지원하지 않는 보조모델 응답 형식입니다: ${String(result.type)}`);
     }
 
+    const payload = result?.type ? result.result : result?.success === true ? result.content : result;
     let text = '';
-    if (typeof result === 'string') text = result;
-    else if (typeof result?.result === 'string') text = result.result;
+    if (payload && typeof payload.getReader === 'function') {
+      const reader = payload.getReader();
+      const decoder = new TextDecoder();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (typeof value === 'string') {
+            text += decoder.decode() + value;
+          } else if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
+            text += decoder.decode(value, { stream: true });
+          } else if (value && typeof value['0'] === 'string') {
+            // RisuAI sends cumulative text snapshots for the first response.
+            decoder.decode();
+            text = value['0'];
+          } else {
+            throw new Error('지원하지 않는 보조모델 스트리밍 응답 형식입니다.');
+          }
+        }
+        text += decoder.decode();
+      } catch (error) {
+        try { await reader.cancel(); } catch {}
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
+    } else if (result?.type === 'streaming') {
+      throw new Error('보조모델 스트림을 읽을 수 없습니다. 프로바이더의 스트리밍을 끄거나 RisuAI를 업데이트하세요.');
+    } else if (result?.type === 'multiline' && Array.isArray(payload)) {
+      text = payload.map(line => Array.isArray(line) ? String(line[1] ?? '') : '').join('\n');
+    } else if (typeof payload === 'string') {
+      text = payload;
+    } else if (typeof result?.result === 'string') {
+      text = result.result;
+    }
 
     text = text
-      .replace(/^\s*<Thoughts>[\s\S]*?<\/Thoughts>\s*/i, '')
+      .replace(/<Thoughts?>[\s\S]*?<\/Thoughts?>/gi, '')
       .trim();
 
     if (!text) throw new Error('보조모델이 빈 메시지를 반환했습니다.');
@@ -1365,7 +1401,15 @@
           state.phase = 'sending';
           state.status = (state.completedTurns + 1) + '번째 메시지를 전송하고 전체 후처리를 기다리는 중입니다.';
           render();
-          const sendResult = await api.sendChat(outgoingMessage);
+          let sendResult;
+          try {
+            sendResult = await api.sendChat(outgoingMessage);
+          } catch (error) {
+            if (/sending chat with plugin-based model is currently blocked/i.test(errorMessage(error))) {
+              throw Object.assign(new Error('현재 RisuAI는 프로바이더 플러그인 메인모델의 자동 전송을 차단합니다. 메인모델을 RisuAI 내장 모델로 변경하세요. 기타 보조모델에는 프로바이더를 사용할 수 있습니다.'), { noRetry: true });
+            }
+            throw error;
+          }
           checkRetrySession(token);
           if (!await sameActiveChat()) {
             throw Object.assign(new Error('응답 처리 중 캐릭터 또는 채팅이 변경되었습니다.'), { noRetry: true });
@@ -1617,7 +1661,7 @@
       if (chatButtonId) await api.unregisterUIPart(chatButtonId);
     });
 
-    console.log('[Autopilot] v1.7.1 loaded');
+    console.log('[Autopilot] v1.7.2 loaded');
   } catch (error) {
     console.error('[Autopilot] 초기화에 실패했습니다.', error);
   }
