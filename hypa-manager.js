@@ -526,9 +526,9 @@
           '--c-surface2: #1e2130;' +
           '--c-border: rgba(255,255,255,.08);' +
           '--c-border-focus: rgba(96,180,210,.6);' +
-          '--c-text: #d4d8f0;' +
-          '--c-text-dim: #6a7a99;' +
-          '--c-text-muted: #424d66;' +
+          '--c-text: #edf0ff;' +
+          '--c-text-dim: #bcc8df;' +
+          '--c-text-muted: #a2b1cb;' +
           '--c-accent: #4ab8d0;' +
           '--c-accent-dim: rgba(74,184,208,.1);' +
           '--c-accent-border: rgba(74,184,208,.25);' +
@@ -564,7 +564,7 @@
         /* ── 탭 ── */
         '.tabs { display: flex; gap: 1px; border-bottom: 1px solid var(--c-border); overflow-x: auto; overflow-y: hidden; }' +
         '.tab-btn { background: none; border: none; border-bottom: 2px solid transparent; color: var(--c-text-dim); font-size: 13px; font-weight: 500; padding: 8px 16px; cursor: pointer; white-space: nowrap; transition: color .15s, border-color .15s; flex-shrink: 0; margin-bottom: -1px; font-family: inherit; }' +
-        '.tab-btn:hover { color: #a8bcd4; }' +
+        '.tab-btn:hover { color: var(--c-text); }' +
         '.tab-btn.active { color: var(--c-accent); border-bottom-color: var(--c-accent); font-weight: 600; }' +
         '.tab-panel { display: none; flex-direction: column; gap: 14px; padding-top: 2px; }' +
         '.tab-panel.active { display: flex; }' +
@@ -580,7 +580,7 @@
         '.range-tools label input { display: block; margin-top: 5px; }' +
 
         /* ── 미니 버튼 ── */
-        '.mini-btn { background: var(--c-surface2); border: 1px solid var(--c-border); color: #99aec8; border-radius: var(--radius-sm); padding: 5px 10px; font-size: 11.5px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, color .15s; font-family: inherit; }' +
+        '.mini-btn { background: var(--c-surface2); border: 1px solid var(--c-border); color: var(--c-text-dim); border-radius: var(--radius-sm); padding: 5px 10px; font-size: 11.5px; font-weight: 500; cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, color .15s; font-family: inherit; }' +
         '.mini-btn:hover { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.16); color: #ccdbe8; }' +
         '.mini-btn.danger { background: var(--c-danger-bg); border-color: rgba(200,80,80,.28); color: var(--c-danger); }' +
         '.mini-btn.danger:hover { background: rgba(200,70,70,.3); color: #f4a0a0; }' +
@@ -599,7 +599,7 @@
         '.msg-role-user { color: var(--c-user); font-size: 11.5px; font-weight: 600; flex-shrink: 0; }' +
         '.msg-role-char { color: var(--c-char); font-size: 11.5px; font-weight: 600; flex-shrink: 0; }' +
         '.msg-role-system { color: var(--c-text-muted); font-size: 11.5px; flex-shrink: 0; }' +
-        '.msg-text { color: #a8b0cc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; line-height: 1.5; }' +
+        '.msg-text { color: var(--c-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; line-height: 1.5; }' +
         '.msg-row:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }' +
         '#message-dialog { margin: auto; width: min(760px, 94vw); max-height: 86vh; padding: 0; background: var(--c-bg); color: var(--c-text); border: 1px solid var(--c-accent-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-panel); }' +
         '#message-dialog[open] { display: flex; flex-direction: column; }' +
@@ -619,7 +619,7 @@
 
         /* ── 폼 요소 ── */
         'input[type="text"], input[type="number"], select, textarea { width: 100%; background: var(--c-surface); border: 1px solid rgba(255,255,255,.1); border-radius: var(--radius-sm); padding: 9px 12px; font-size: 13px; color: #dde0f4; outline: none; font-family: inherit; transition: border-color .15s, box-shadow .15s; }' +
-        'input[type="text"]::placeholder, input[type="number"]::placeholder, textarea::placeholder { color: var(--c-text-muted); }' +
+        'input[type="text"]::placeholder, input[type="number"]::placeholder, textarea::placeholder { color: var(--c-text-muted); opacity: 1; }' +
         'textarea { resize: vertical; min-height: 160px; line-height: 1.65; }' +
         'select { cursor: pointer; }' +
         'input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:focus { border-color: var(--c-border-focus); box-shadow: 0 0 0 3px rgba(74,184,208,.08); }' +
@@ -639,7 +639,7 @@
         '.btn-main { background: linear-gradient(135deg, #1d8fa8 0%, #166e84 100%); }' +
         '.btn-alt { background: linear-gradient(135deg, #2a5298 0%, #1e3e78 100%); }' +
         '.btn-danger { background: linear-gradient(135deg, #803232 0%, #632828 100%); }' +
-        '.btn-muted { background: var(--c-surface2); border: 1px solid var(--c-border); color: #a8b8cc; }' +
+        '.btn-muted { background: var(--c-surface2); border: 1px solid var(--c-border); color: var(--c-text-dim); }' +
         '.btn-muted:not(:disabled):hover { background: rgba(255,255,255,.12); color: #ccd; }' +
 
         /* ── 슬롯 ── */
