@@ -1,7 +1,7 @@
 //@name chat_find_replace
 //@display-name 채팅 찾기/바꾸기
 //@api 3.0
-//@version 1.0.0
+//@version 1.2.0
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/chat-find-replace.js
 
 (async () => {
@@ -22,9 +22,9 @@
     theme: "light",
     scope: "current",
     showAllPreview: false,
-    fullTextMessages: new Set(),
     editingKey: null,
     editingMatch: null,
+    viewingMatch: null,
     globalStats: { characterCount: 0, chatCount: 0 },
   };
 
@@ -32,6 +32,8 @@
   const searchDebounceMs = 300;
   const maxRenderedSearchResults = 80;
   let searchTimer = null;
+  // Undo backup exists only for the lifetime of this plugin instance.
+  let lastBackup = null;
   const textKeys = ["data", "content", "message", "text", "value"];
   const arrayKeys = ["message", "messages", "chat", "chats", "data", "history", "items"];
 
@@ -377,10 +379,10 @@
       .join("\n\n");
   }
 
-  function renderSnippet(html, plainText) {
+  function renderSnippet(html, plainText, showButton = true) {
     const shouldFold = String(plainText).length > foldLimit;
     const foldedClass = shouldFold ? " folded" : "";
-    const button = shouldFold ? '<button class="foldToggle" type="button">더 보기</button>' : "";
+    const button = showButton ? '<button class="foldToggle" type="button">더 보기</button>' : "";
     return `<span class="snippet${foldedClass}">${html}</span>${button}`;
   }
 
@@ -388,12 +390,47 @@
     root.querySelectorAll(".foldToggle").forEach((button) => {
       button.addEventListener("click", (event) => {
         event.stopPropagation();
-        const snippet = button.previousElementSibling;
-        const expanded = snippet.classList.toggle("expanded");
-        snippet.classList.toggle("folded", !expanded);
-        button.textContent = expanded ? "접기" : "더 보기";
+        const card = button.closest("[data-chat-message]");
+        if (!card) return;
+        const messageIndex = Number(card.dataset.chatMessage);
+        const message = state.messages[messageIndex];
+        openFullTextModal({
+          messageIndex,
+          role: getRole(message),
+          text: getMessageTextRef(message)?.value ?? "",
+          ranges: [],
+        });
       });
     });
+  }
+
+  function openFullTextModal(match) {
+    state.viewingMatch = match;
+    const modal = document.getElementById("fullTextModal");
+    const content = document.getElementById("fullTextModalContent");
+    document.getElementById("fullTextModalTitle").textContent =
+      `전체 보기 · ${match.label || `#${match.messageIndex + 1} - ${roleLabel(match.role)}`}`;
+    content.innerHTML = highlightRanges(match.text ?? "", match.ranges || []);
+    modal.showModal();
+    document.body.classList.add("viewingFullText");
+    content.scrollTop = 0;
+  }
+
+  function closeFullTextModal() {
+    document.getElementById("fullTextModal").close();
+    state.viewingMatch = null;
+  }
+
+  function editFullTextMessage() {
+    const match = state.viewingMatch;
+    if (!match) return;
+    closeFullTextModal();
+    openEditModal(match);
+  }
+
+  function scrollFullText(toBottom) {
+    const content = document.getElementById("fullTextModalContent");
+    content.scrollTo({ top: toBottom ? content.scrollHeight : 0, behavior: "smooth" });
   }
 
   function openEditModal(match) {
@@ -425,7 +462,6 @@
 
     try {
       await saveEditedMatch(match, document.getElementById("editModalText").value);
-      state.fullTextMessages.delete(state.editingKey);
       closeEditModal();
       if (state.scope === "current") await refreshChat();
       await runSearch();
@@ -478,15 +514,16 @@
   }
 
   async function saveChat(nextChat, summary) {
-    await api.pluginStorage.setItem("lastBackup", {
+    const backup = {
       savedAt: new Date().toISOString(),
       charIndex: state.charIndex,
       chatIndex: state.chatIndex,
-      chat: state.chat,
+      chat: clone(state.chat),
       summary,
-    });
+    };
 
-    await api.setChatToIndex(state.charIndex, state.chatIndex, nextChat);
+    await api.setChatToIndex(backup.charIndex, backup.chatIndex, nextChat);
+    lastBackup = backup;
     state.chat = nextChat;
     state.messages = getByPath(nextChat, state.messagePath);
   }
@@ -694,17 +731,14 @@
         const active = visibleIndex === state.currentMatch ? " active" : "";
         const countLabel = match.count > 1 ? ` · ${match.count}개 일치` : "";
         const fullKey = match.fullKey || `${match.messageIndex}`;
-        const fullTextOpen = state.fullTextMessages.has(fullKey);
-        const resultHtml = fullTextOpen ? highlightRanges(text, match.ranges) : buildSearchExcerpt(text, match.ranges);
-        const resultText = fullTextOpen ? "" : resultHtml.replace(/<[^>]+>/g, "");
-        const fullTextLabel = fullTextOpen ? "부분 보기" : "전문 보기";
+        const resultHtml = buildSearchExcerpt(text, match.ranges);
+        const resultText = resultHtml.replace(/<[^>]+>/g, "");
 
         return `
           <div class="match${active}" data-match="${visibleIndex}">
             <span class="meta">${escapeHtml(match.label || `#${match.messageIndex + 1} - ${roleLabel(match.role)}`)}${countLabel}</span>
-            ${renderSnippet(resultHtml, resultText)}
-            <button class="fullTextToggle" type="button" data-full-match="${escapeHtml(fullKey)}">${fullTextLabel}</button>
-            <button class="editToggle" type="button" data-edit-match="${escapeHtml(fullKey)}">직접 수정</button>
+            ${renderSnippet(resultHtml, resultText, false)}
+            <button class="fullTextToggle" type="button" data-full-match="${escapeHtml(fullKey)}">더 보기</button>
           </div>
         `;
       })
@@ -725,25 +759,8 @@
       button.addEventListener("click", (event) => {
         event.stopPropagation();
         const messageKey = button.dataset.fullMatch;
-        if (state.fullTextMessages.has(messageKey)) {
-          state.fullTextMessages.delete(messageKey);
-        } else {
-          state.fullTextMessages.add(messageKey);
-        }
-        renderMatches();
-      });
-    });
-
-    list.querySelectorAll(".editToggle").forEach((button) => {
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
-        const editKey = button.dataset.editMatch;
-        const match = state.matches.find((item) => (item.fullKey || `${item.messageIndex}`) === editKey);
-        if (!match) {
-          renderStatus("수정할 메시지를 찾지 못했습니다.", "error");
-          return;
-        }
-        openEditModal(match);
+        const match = state.matches.find((item) => (item.fullKey || `${item.messageIndex}`) === messageKey);
+        if (match) openFullTextModal(match);
       });
     });
 
@@ -884,7 +901,7 @@
   }
 
   async function undoLast() {
-    const backup = await api.pluginStorage.getItem("lastBackup");
+    const backup = lastBackup;
     if (!backup || !backup.chat) {
       renderStatus("되돌릴 백업이 없습니다.", "error");
       return;
@@ -897,7 +914,7 @@
     }
 
     await api.setChatToIndex(state.charIndex, state.chatIndex, backup.chat);
-    await api.pluginStorage.removeItem("lastBackup");
+    lastBackup = null;
     await refreshChat();
     await runSearch();
     renderStatus("마지막 바꾸기를 되돌렸습니다.", "success");
@@ -929,152 +946,225 @@
         :root {
           color-scheme: light;
           font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+          --bg: #f4f4f0;
+          --bg-panel: #faf9f5;
+          --surface: #ffffff;
+          --border: #e3e3db;
+          --border-strong: #cbcbc0;
+          --text: #1f2023;
+          --text-muted: #6b6b63;
+          --text-faint: #8d8d84;
+          --accent: #2f6f8a;
+          --accent-hover: #285d74;
+          --accent-soft: rgba(47, 111, 138, 0.1);
+          --accent-contrast: #ffffff;
+          --danger: #b1493c;
+          --danger-soft: rgba(177, 73, 60, 0.08);
+          --success: #3f7d34;
+          --success-soft: rgba(63, 125, 52, 0.08);
+          --mark-bg: #ffdd7a;
+          --mark-text: #3a2c00;
+          --shadow-sm: 0 1px 2px rgba(20, 20, 15, 0.05);
+          --shadow-md: 0 6px 20px rgba(20, 20, 15, 0.08);
+          --shadow-pop: 0 20px 48px rgba(20, 20, 15, 0.22);
+          --radius-sm: 8px;
+          --radius-md: 12px;
+          --radius-lg: 16px;
         }
+
+        body[data-theme="dark"] {
+          color-scheme: dark;
+          --bg: #17181a;
+          --bg-panel: #1b1c1f;
+          --surface: #212327;
+          --border: #34363b;
+          --border-strong: #45474d;
+          --text: #f1f1ec;
+          --text-muted: #a8a8a0;
+          --text-faint: #85857c;
+          --accent: #5aa0c0;
+          --accent-hover: #74b2ce;
+          --accent-soft: rgba(90, 160, 192, 0.16);
+          --accent-contrast: #0c1418;
+          --danger: #e2897a;
+          --danger-soft: rgba(226, 137, 122, 0.14);
+          --success: #8fcf7c;
+          --success-soft: rgba(143, 207, 124, 0.14);
+          --mark-bg: #6b5420;
+          --mark-text: #ffe9ad;
+          --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+          --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.35);
+          --shadow-pop: 0 24px 56px rgba(0, 0, 0, 0.55);
+        }
+
         * { box-sizing: border-box; }
-        body { margin: 0; min-height: 100vh; background: #f7f7f4; color: #242424; }
+        body {
+          margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+          -webkit-font-smoothing: antialiased; transition: background 0.2s ease, color 0.2s ease;
+        }
         .app { min-height: 100vh; display: grid; grid-template-rows: auto 1fr; }
+
         header {
           display: flex; align-items: center; justify-content: space-between; gap: 16px;
-          padding: 16px 20px; border-bottom: 1px solid #d7d7d0; background: #ffffff;
+          padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--surface);
+          position: sticky; top: 0; z-index: 10; box-shadow: var(--shadow-sm);
         }
-        h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0; }
+        h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
         .headerActions { display: flex; align-items: center; gap: 8px; }
-        .themeToggle {
-          width: 36px; height: 36px; border: 1px solid #c8c8bf; background: #ffffff;
-          color: #242424; border-radius: 6px; font-size: 18px; line-height: 1; cursor: pointer;
+        .themeToggle, .close {
+          width: 36px; height: 36px; border: 1px solid var(--border-strong); background: var(--surface);
+          color: var(--text); border-radius: var(--radius-sm); font-size: 16px; line-height: 1; padding: 0;
+          cursor: pointer; display: grid; place-items: center;
+          transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
         }
-        .close {
-          width: 36px; height: 36px; border: 1px solid #c8c8bf; background: #ffffff;
-          color: #242424; border-radius: 6px; font-size: 18px; cursor: pointer;
+        .themeToggle:hover { border-color: var(--accent); color: var(--accent); }
+        .close:hover { border-color: var(--danger); color: var(--danger); }
+        .themeToggle:active, .close:active { transform: scale(0.93); }
+
+        main { display: grid; grid-template-columns: minmax(300px, 380px) 1fr; min-height: 0; }
+        .panel { padding: 18px; border-right: 1px solid var(--border); background: var(--bg-panel); overflow: auto; }
+        .results { padding: 20px 22px; overflow: auto; }
+        .panel::-webkit-scrollbar, .results::-webkit-scrollbar, .fullTextContent::-webkit-scrollbar { width: 8px; }
+        .panel::-webkit-scrollbar-thumb, .results::-webkit-scrollbar-thumb, .fullTextContent::-webkit-scrollbar-thumb {
+          background: var(--border-strong); border-radius: 999px;
         }
-        main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; min-height: 0; }
-        .panel { padding: 18px; border-right: 1px solid #d7d7d0; background: #fbfbf8; overflow: auto; }
-        .results { padding: 18px; overflow: auto; }
-        .scrollWidget {
-          position: fixed; right: 18px; bottom: 18px; z-index: 5000;
-          display: grid; gap: 8px;
-        }
+        .panel::-webkit-scrollbar-track, .results::-webkit-scrollbar-track, .fullTextContent::-webkit-scrollbar-track { background: transparent; }
+
+        .scrollWidget { position: fixed; right: 18px; bottom: 18px; z-index: 5000; display: grid; gap: 8px; }
         .scrollWidget button {
-          width: 42px; height: 42px; min-height: 42px; border-radius: 8px;
-          box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12); font-size: 18px;
+          width: 40px; height: 40px; min-height: 40px; padding: 0; border-radius: 50%;
+          background: var(--surface); border: 1px solid var(--border-strong); box-shadow: var(--shadow-md);
+          font-size: 16px; color: var(--text-muted); transition: transform 0.12s ease, color 0.15s ease, border-color 0.15s ease;
         }
-        label { display: block; margin: 0 0 6px; font-size: 13px; font-weight: 650; }
+        .scrollWidget button:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
+
+        label { display: block; margin: 0 0 6px; font-size: 12.5px; font-weight: 650; color: var(--text-muted); letter-spacing: 0.01em; }
         input[type="text"] {
-          width: 100%; height: 38px; border: 1px solid #bdbdb5; border-radius: 6px;
-          padding: 0 10px; background: #ffffff; color: #242424; font-size: 14px;
+          width: 100%; height: 38px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+          padding: 0 12px; background: var(--surface); color: var(--text); font-size: 14px;
+          transition: border-color 0.15s ease, box-shadow 0.15s ease;
         }
-        .field { margin-bottom: 14px; }
-        .rangeField { margin-top: 10px; }
+        input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+        .field { margin-bottom: 16px; }
+        .rangeField { margin-top: 0; }
         .rangeInputs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        .checks { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; margin: 12px 0 16px; }
-        .check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; white-space: nowrap; }
-        .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+        .panelSection { padding-top: 18px; margin-top: 2px; border-top: 1px solid var(--border); }
+
+        .checks {
+          display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+          margin: 0 0 16px; padding: 10px 12px; background: var(--surface);
+          border: 1px solid var(--border); border-radius: var(--radius-sm);
+        }
+        .check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; white-space: nowrap; color: var(--text-muted); cursor: pointer; }
+        .check input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+        .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
         .actions .wide { grid-column: 1 / -1; }
-        .viewActions { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 14px; }
+        .viewActions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
         body[data-scope="global"] .currentOnly { display: none; }
+
         button {
-          min-height: 36px; border: 1px solid #b9b9b0; border-radius: 6px; background: #ffffff;
-          color: #242424; font-weight: 650; cursor: pointer;
+          min-height: 37px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+          background: var(--surface); color: var(--text); font: inherit; font-weight: 650; font-size: 13px;
+          cursor: pointer; transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.05s ease;
         }
-        button.primary { border-color: #315f72; background: #315f72; color: #ffffff; }
-        button.danger { border-color: #9b5a4d; color: #8d3f33; }
+        button:hover { border-color: var(--accent); color: var(--accent); }
+        button:active { transform: scale(0.98); }
+        button.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
+        button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-contrast); }
+        button.danger { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+        button.danger:hover { background: var(--danger); color: #fff; }
+
         .status {
-          margin-top: 14px; min-height: 34px; padding: 9px 10px; border: 1px solid #d2d2c9;
-          border-radius: 6px; background: #ffffff; color: #4a4a45; font-size: 13px; line-height: 1.35;
+          margin-top: 14px; min-height: 34px; padding: 10px 12px; border: 1px solid var(--border);
+          border-radius: var(--radius-sm); background: var(--surface); color: var(--text-muted); font-size: 12.5px; line-height: 1.45;
         }
-        .status.error { border-color: #d0a19a; color: #8d3f33; }
-        .status.success { border-color: #9ab78d; color: #356a2f; }
-        .resultHead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-        .resultHead h2 { margin: 0; font-size: 15px; }
-        #matchCount { color: #5d5d56; font-size: 13px; }
-        #matchList { display: grid; gap: 8px; }
+        .status.error { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+        .status.success { border-color: var(--success); color: var(--success); background: var(--success-soft); }
+
+        .resultHead {
+          display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+          margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
+        }
+        .resultHead h2 { margin: 0; font-size: 15px; font-weight: 700; }
+        #matchCount { color: var(--text-faint); font-size: 12.5px; font-weight: 600; }
+
+        #matchList { display: grid; gap: 10px; }
         .match {
-          width: 100%; min-height: 64px; padding: 10px 12px; text-align: left;
-          background: #ffffff; border: 1px solid #d0d0c8; border-radius: 6px;
-          cursor: text; user-select: text;
+          width: 100%; min-height: 64px; padding: 12px 14px; text-align: left;
+          background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+          cursor: text; user-select: text; box-shadow: var(--shadow-sm);
+          transition: border-color 0.15s ease, box-shadow 0.15s ease;
         }
-        .match.active { border-color: #315f72; box-shadow: 0 0 0 2px rgba(49, 95, 114, 0.16); }
-        .meta { display: block; margin-bottom: 5px; color: #62625b; font-size: 12px; font-weight: 700; }
-        .snippet { display: block; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 13px; line-height: 1.45; font-weight: 500; cursor: text; user-select: text; }
-        .snippet.folded { max-height: 180px; overflow: hidden; border-bottom: 1px solid rgba(0, 0, 0, 0.08); }
-        .snippet.expanded { max-height: none; overflow: visible; border-bottom: 0; }
-        .foldToggle {
-          margin-top: 8px; min-height: 30px; padding: 0 10px; border-color: #c8c8bf;
-          background: #f7f7f4; color: #315f72; font-size: 12px; font-weight: 700;
+        .match.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+        .meta { display: inline-block; margin-bottom: 7px; color: var(--accent); font-size: 11.5px; font-weight: 750; letter-spacing: 0.01em; }
+        .snippet {
+          display: block; overflow-wrap: anywhere; white-space: pre-wrap; font-size: 13.5px;
+          line-height: 1.55; font-weight: 450; color: var(--text); cursor: text; user-select: text;
         }
-        .fullTextToggle {
-          margin-top: 8px; min-height: 30px; padding: 0 10px; border-color: #c8c8bf;
-          background: #ffffff; color: #315f72; font-size: 12px; font-weight: 700;
+        .snippet.folded { max-height: 180px; overflow: hidden; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+
+        .foldToggle, .fullTextToggle {
+          margin-top: 9px; min-height: 28px; padding: 0 11px; border: 1px solid var(--border);
+          background: transparent; color: var(--accent); font-size: 11.5px; font-weight: 700; border-radius: 999px;
         }
-        .editToggle {
-          margin-top: 8px; margin-left: 6px; min-height: 30px; padding: 0 10px; border-color: #c8c8bf;
-          background: #ffffff; color: #315f72; font-size: 12px; font-weight: 700;
-        }
+        .foldToggle:hover, .fullTextToggle:hover { background: var(--accent-soft); border-color: var(--accent); }
+
         .editArea {
-          width: 100%; min-height: 220px; resize: vertical; border: 1px solid #bdbdb5; border-radius: 6px;
-          padding: 10px; background: #ffffff; color: #242424; font: inherit; line-height: 1.45;
-          white-space: pre-wrap;
+          width: 100%; min-height: 220px; resize: vertical; border: 1px solid var(--border-strong);
+          border-radius: var(--radius-sm); padding: 12px; background: var(--surface); color: var(--text);
+          font: inherit; font-size: 13.5px; line-height: 1.55; white-space: pre-wrap;
+          transition: border-color 0.15s ease, box-shadow 0.15s ease;
         }
-        .editActions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+        .editArea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
         .editModal {
           position: fixed; inset: 0; display: none; place-items: center; padding: 18px;
-          background: rgba(20, 20, 18, 0.45); z-index: 9999;
+          background: rgba(10, 10, 8, 0.5); backdrop-filter: blur(2px); z-index: 9999;
         }
         .editModal.open { display: grid; }
         .editDialog {
           width: min(860px, 100%); max-height: min(760px, 92vh); display: grid; grid-template-rows: auto 1fr auto;
-          background: #ffffff; color: #242424; border: 1px solid #d0d0c8; border-radius: 8px; overflow: hidden;
+          background: var(--surface); color: var(--text); border: 1px solid var(--border);
+          border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-pop);
         }
-        .editDialogHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #d7d7d0; }
-        .editDialogHead h2 { margin: 0; font-size: 15px; line-height: 1.3; }
-        .editDialogClose { width: 34px; height: 34px; min-height: 34px; }
-        .editDialogBody { padding: 14px; min-height: 0; }
+        .editDialogHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+        .editDialogHead h2 { margin: 0; font-size: 15px; font-weight: 700; line-height: 1.3; }
+        .editDialogClose { width: 32px; height: 32px; min-height: 32px; padding: 0; border-radius: 50%; font-size: 15px; display: grid; place-items: center; }
+        .editDialogBody { padding: 16px 18px; min-height: 0; }
         .editDialogBody .editArea { height: min(520px, 58vh); min-height: 260px; }
-        .editDialogActions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px 14px; border-top: 1px solid #d7d7d0; }
-        mark { padding: 0 2px; border-radius: 3px; background: #fff1a8; color: inherit; }
-        .empty {
-          padding: 20px; border: 1px dashed #c9c9c0; border-radius: 6px;
-          color: #66665f; text-align: center; background: #ffffff;
+        .editDialogActions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 14px 18px; border-top: 1px solid var(--border); }
+
+        body.viewingFullText { overflow: hidden; }
+        .fullTextDialog {
+          padding: 0; margin: auto; width: min(860px, calc(100% - 32px)); max-height: 90vh; max-height: 90dvh;
+          border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-pop);
+          background: var(--surface); color: var(--text);
         }
+        .fullTextDialog:not([open]) { display: none; }
+        .fullTextDialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+        .fullTextActions { grid-template-columns: 1fr; }
+        .fullTextBody { position: relative; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
+        .fullTextBody .scrollWidget { position: absolute; z-index: 1; }
+        .fullTextDialog::backdrop { background: rgba(10, 10, 8, 0.5); backdrop-filter: blur(2px); }
+        .fullTextContent { padding: 18px 76px 18px 18px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; font-size: 13.5px; line-height: 1.6; }
+
+        mark { padding: 0 3px; border-radius: 4px; background: var(--mark-bg); color: var(--mark-text); font-weight: 600; }
+
+        .empty {
+          padding: 24px; border: 1px dashed var(--border-strong); border-radius: var(--radius-md);
+          color: var(--text-faint); text-align: center; background: var(--surface); font-size: 13px;
+        }
+
         @media (max-width: 760px) {
+          header { padding: 12px 16px; }
           main { grid-template-columns: 1fr; }
-          .panel { border-right: 0; border-bottom: 1px solid #d7d7d0; }
+          .panel { border-right: 0; border-bottom: 1px solid var(--border); }
+          .results { padding: 16px; }
           .scrollWidget { right: 12px; bottom: 12px; }
         }
-        body[data-theme="dark"] { color-scheme: dark; background: #1c1d1d; color: #f1f1ed; }
-        body[data-theme="dark"] header,
-        body[data-theme="dark"] .panel,
-        body[data-theme="dark"] .match,
-        body[data-theme="dark"] .empty,
-        body[data-theme="dark"] .status,
-        body[data-theme="dark"] input[type="text"],
-        body[data-theme="dark"] button {
-          background: #252626; color: #f1f1ed;
-        }
-        body[data-theme="dark"] header,
-        body[data-theme="dark"] .panel,
-        body[data-theme="dark"] input[type="text"],
-        body[data-theme="dark"] button,
-        body[data-theme="dark"] .match,
-        body[data-theme="dark"] .empty,
-        body[data-theme="dark"] .status {
-          border-color: #464743;
-        }
-        body[data-theme="dark"] button.primary { background: #3f7488 !important; border-color: #3f7488 !important; }
-        body[data-theme="dark"] .status.error { border-color: #9b5a4d; color: #ffb4a8; }
-        body[data-theme="dark"] .status.success { border-color: #698b5b; color: #bde6ad; }
-        body[data-theme="dark"] .snippet.folded { border-bottom-color: rgba(255, 255, 255, 0.12); }
-        body[data-theme="dark"] .foldToggle { background: #1f2020; color: #9ed2e5; }
-        body[data-theme="dark"] .fullTextToggle { background: #252626; color: #9ed2e5; }
-        body[data-theme="dark"] .editToggle { background: #252626; color: #9ed2e5; }
-        body[data-theme="dark"] .editArea { background: #1f2020; color: #f1f1ed; border-color: #464743; }
-        body[data-theme="dark"] .editDialog { background: #252626; color: #f1f1ed; border-color: #464743; }
-        body[data-theme="dark"] .editDialogHead,
-        body[data-theme="dark"] .editDialogActions { border-color: #464743; }
-        body[data-theme="dark"] .scrollWidget button { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.32); }
-        body[data-theme="dark"] .meta,
-        body[data-theme="dark"] #matchCount { color: #b7b7ae; }
-        body[data-theme="dark"] mark { background: #775f20; color: #ffffff; }
       </style>
 
       <div class="app">
@@ -1091,16 +1181,16 @@
               <label for="findText">찾을 단어</label>
               <input id="findText" type="text" autocomplete="off" />
             </div>
-            <div class="field currentOnly">
+            <div class="field panelSection currentOnly">
               <label for="replaceText">바꿀 단어</label>
               <input id="replaceText" type="text" autocomplete="off" />
             </div>
             <div class="actions currentOnly">
               <button id="replaceCurrentBtn">하나 바꾸기</button>
-              <button id="replaceAllBtn">모두 바꾸기</button>
+              <button id="replaceAllBtn" class="primary">모두 바꾸기</button>
               <button id="undoBtn" class="danger wide">되돌리기</button>
             </div>
-            <div class="field rangeField currentOnly">
+            <div class="field rangeField panelSection currentOnly">
               <label>채팅 범위 보기</label>
               <div class="rangeInputs">
                 <input id="rangeStart" type="text" inputmode="numeric" autocomplete="off" placeholder="시작" />
@@ -1111,7 +1201,7 @@
               <button id="fullPreviewBtn">전체 보기</button>
               <button id="recentPreviewBtn">최근 20개 보기</button>
             </div>
-            <div class="checks">
+            <div class="checks panelSection">
               <label class="check"><input id="caseSensitive" type="checkbox" /> 대소문자 구분</label>
               <label class="check"><input id="includeUser" type="checkbox" checked /> 사용자</label>
               <label class="check"><input id="includeAssistant" type="checkbox" checked /> 캐릭터</label>
@@ -1130,6 +1220,22 @@
           <button id="scrollTopBtn" title="맨 위로">↑</button>
           <button id="scrollBottomBtn" title="맨 아래로">↓</button>
         </div>
+        <dialog class="editDialog fullTextDialog" id="fullTextModal" aria-labelledby="fullTextModalTitle">
+          <div class="editDialogHead">
+            <h2 id="fullTextModalTitle">전체 보기</h2>
+            <button class="editDialogClose" id="fullTextModalClose" type="button" aria-label="전체 보기 닫기" autofocus>×</button>
+          </div>
+          <div class="fullTextBody">
+            <div class="snippet fullTextContent" id="fullTextModalContent" tabindex="0"></div>
+            <div class="scrollWidget">
+              <button id="fullTextTopBtn" type="button" title="맨 위로" aria-label="맨 위로">↑</button>
+              <button id="fullTextBottomBtn" type="button" title="맨 아래로" aria-label="맨 아래로">↓</button>
+            </div>
+          </div>
+          <div class="editDialogActions fullTextActions">
+            <button id="fullTextEditBtn" type="button">직접 수정</button>
+          </div>
+        </dialog>
         <div class="editModal" id="editModal">
           <div class="editDialog">
             <div class="editDialogHead">
@@ -1155,6 +1261,21 @@
     document.getElementById("undoBtn").addEventListener("click", undoLast);
     document.getElementById("fullPreviewBtn").addEventListener("click", showFullPreview);
     document.getElementById("recentPreviewBtn").addEventListener("click", showRecentPreview);
+    document.getElementById("fullTextModalClose").addEventListener("click", closeFullTextModal);
+    document.getElementById("fullTextEditBtn").addEventListener("click", editFullTextMessage);
+    document.getElementById("fullTextTopBtn").addEventListener("click", () => scrollFullText(false));
+    document.getElementById("fullTextBottomBtn").addEventListener("click", () => scrollFullText(true));
+    document.getElementById("fullTextModal").addEventListener("close", () => {
+      state.viewingMatch = null;
+      document.body.classList.remove("viewingFullText");
+      document.getElementById("fullTextModalContent").textContent = "";
+    });
+    document.getElementById("fullTextModal").addEventListener("click", (event) => {
+      if (event.target.id !== "fullTextModal") return;
+      const bounds = event.currentTarget.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right ||
+          event.clientY < bounds.top || event.clientY > bounds.bottom) closeFullTextModal();
+    });
     document.getElementById("editModalSave").addEventListener("click", saveEditModal);
     document.getElementById("editModalCancel").addEventListener("click", closeEditModal);
     document.getElementById("editModalClose").addEventListener("click", closeEditModal);
@@ -1188,7 +1309,6 @@
       state.scope = scope;
       state.matches = [];
       state.currentMatch = 0;
-      state.fullTextMessages.clear();
       state.showAllPreview = false;
       const savedTheme = await api.pluginStorage.getItem("theme");
       state.theme = savedTheme === "dark" ? "dark" : "light";
