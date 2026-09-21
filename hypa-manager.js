@@ -775,9 +775,6 @@
       document.getElementById('btn-close').addEventListener('click', () => {
         Risuai.hideContainer()
       })
-      document.body.addEventListener('click', event => {
-        if (event.target === document.body) Risuai.hideContainer()
-      })
       const panel = document.querySelector('.panel')
       if (panel) panel.addEventListener('click', event => event.stopPropagation())
 
@@ -810,13 +807,6 @@
       })
       const messageDialog = document.getElementById('message-dialog')
       document.getElementById('message-dialog-close').addEventListener('click', () => messageDialog.close())
-      messageDialog.addEventListener('click', event => {
-        if (event.target !== messageDialog) return
-        const rect = messageDialog.getBoundingClientRect()
-        if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) {
-          messageDialog.close()
-        }
-      })
       function openMessageDialog(row) {
         const role = row.querySelector('.msg-role-system, .msg-role-user, .msg-role-char').textContent
         document.getElementById('message-dialog-title').textContent = '#' + row.dataset.idx + ' · ' + role
