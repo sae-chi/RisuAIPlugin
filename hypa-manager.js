@@ -1,7 +1,7 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.10.0
+//@version 1.10.1
 //@arg summary_prompt string Default summary prompt
 
 (async () => {
@@ -871,6 +871,14 @@
       })
       const messageDialog = document.getElementById('message-dialog')
       document.getElementById('message-dialog-close').addEventListener('click', () => messageDialog.close())
+      messageDialog.addEventListener('click', event => {
+        if (event.target !== messageDialog) return
+        const rect = messageDialog.getBoundingClientRect()
+        if (event.clientX < rect.left || event.clientX > rect.right ||
+            event.clientY < rect.top || event.clientY > rect.bottom) {
+          messageDialog.close()
+        }
+      })
       function openMessageDialog(row) {
         const role = row.querySelector('.msg-role-system, .msg-role-user, .msg-role-char').textContent
         document.getElementById('message-dialog-title').textContent = '#' + row.dataset.idx + ' · ' + role
