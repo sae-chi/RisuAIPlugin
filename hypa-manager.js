@@ -1,16 +1,41 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.8.0
+//@version 1.10.0
 //@arg summary_prompt string Default summary prompt
-//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/hypa-manager.js
 
 (async () => {
   try {
     const PROMPT_STORAGE_KEY = 'prompt_presets'
+    const DEFAULT_PRESET_KEY = 'default_prompt_preset'
+    let promptSaveQueue = Promise.resolve()
     const MAX_SLOTS = 5
     let summaryRequestActive = false
     let summaryBodyInterceptor = null
+
+    let manualBusy = false
+    const memoryStamp = chat => JSON.stringify(chat.hypaV3Data ?? null)
+    const messageStamp = chat => JSON.stringify((chat.message ?? []).map(m => [m.chatId, m.role, m.data]))
+
+    // Resolve numeric API indices independently from getCurrentCharacterIndex,
+    // which can return a character key on newer RisuAI versions.
+    async function resolveOwner(owner) {
+      const db = await Risuai.getDatabase(['characters'])
+      const chars = Object.values(db?.characters ?? {})
+      const matches = chars.map((char, index) => ({ char, index })).filter(x => x.char?.chaId === owner.charId)
+      if (matches.length !== 1) throw new Error('대상 캐릭터를 고유하게 찾을 수 없습니다. DB 접근 권한도 확인하세요.')
+      const { char, index: charIndex } = matches[0]
+      const hits = (char.chats ?? []).map((chat, index) => ({ chat, index })).filter(x => owner.chatId ? x.chat?.id === owner.chatId : x.index === owner.chatIndex)
+      if (hits.length !== 1) throw new Error('대상 채팅 ID가 없거나 중복되었습니다.')
+      const { chat, index: chatIndex } = hits[0]
+      if (!owner.chatId && messageStamp(chat) !== owner.messages) throw new Error('ID 없는 채팅이 변경되었습니다. 창을 다시 여세요.')
+      return { char, chat, charIndex, chatIndex }
+    }
+
+    function ownerOf(char, chat, chatIndex) {
+      if (!char?.chaId || !chat) throw new Error('캐릭터 또는 채팅을 찾을 수 없습니다.')
+      return { charId: char.chaId, chatId: chat.id || null, chatIndex, messages: messageStamp(chat) }
+    }
 
     function toIndex(value, fallback = 0) {
       const number = Number(value)
@@ -46,27 +71,37 @@
       delete chat.suggestMessages
     }
 
-    async function getCurrentChat() {
-      const charIndex = await Risuai.getCurrentCharacterIndex()
-      const chatIndex = await Risuai.getCurrentChatIndex()
-      const chat = await Risuai.getChatFromIndex(charIndex, chatIndex)
-      return { charIndex, chatIndex, chat }
-    }
-
     async function getCharacterContext() {
-      const charIndex = await Risuai.getCurrentCharacterIndex()
-      const chatIndex = await Risuai.getCurrentChatIndex()
-      const currentChar = await Risuai.getCharacter()
-      const indexedChar = await Risuai.getCharacterFromIndex(charIndex)
-      const char = currentChar || indexedChar
-      const currentChat = currentChar?.chats?.[chatIndex] || currentChar?.chats?.[currentChar?.chatPage ?? chatIndex]
-      const indexedChat = await Risuai.getChatFromIndex(charIndex, chatIndex)
-      const chat = currentChat || indexedChat
-      return { charIndex, chatIndex, char, chat }
+      const char = await Risuai.getCharacter()
+      const chatIndex = char?.chatPage ?? await Risuai.getCurrentChatIndex()
+      const chat = char?.chats?.[chatIndex]
+      return resolveOwner(ownerOf(char, chat, chatIndex))
     }
 
     function getCharId(char) {
-      return (char?.name ?? 'unknown').replace(/\s+/g, '_').slice(0, 64)
+      if (!char?.chaId) throw new Error('캐릭터 고유 ID가 없습니다.')
+      return char.chaId
+    }
+
+    async function importLegacySlots(char) {
+      const legacyId = (char?.name ?? 'unknown').replace(/\s+/g, '_').slice(0, 64)
+      const id = getCharId(char)
+      if (id === legacyId) return
+      const legacy = await getSlotList(legacyId)
+      if (!legacy.length) throw new Error('현재 이름으로 저장된 기존 슬롯이 없습니다.')
+      if (!confirm('이름 기반 기존 슬롯을 현재 캐릭터에 복사할까요? 동명 캐릭터가 사용한 슬롯일 수 있습니다. 기존 슬롯은 보존되며 동명 슬롯은 덮어쓰지 않습니다.')) return
+      const current = await getSlotList(id)
+      for (const slot of legacy) {
+        if (current.length >= MAX_SLOTS) break
+        if (current.some(item => item.name === slot.name)) continue
+        const data = await getSlotData(legacyId, slot.name)
+        if (!data) continue
+        await Risuai.pluginStorage.setItem(slotDataKey(id, slot.name), JSON.stringify(data))
+        current.push(slot)
+        await saveSlotList(id, current)
+      }
+      await refreshSlots(id)
+      showMsg('memory-msg', '기존 슬롯 복사 완료. 원본은 보존했습니다.', false)
     }
 
     function getCurrentFirstMessage(char, chat) {
@@ -84,8 +119,7 @@
       return String(firstMessage).trim()
     }
 
-    async function getRawMessages() {
-      const { char, chat } = await getCharacterContext()
+    function getRawMessages(char, chat) {
       const messages = chat?.message ?? []
       const firstMessage = getCurrentFirstMessage(char, chat)
       if (!firstMessage) return messages
@@ -101,14 +135,15 @@
     }
 
     async function getConfig() {
+      await promptSaveQueue
       const savedPrompt = (await Risuai.getArgument('summary_prompt') ?? '').trim()
-      const db = await Risuai.getDatabase(['seperateModelsForAxModels', 'seperateModels', 'subModel'])
+      const db = await Risuai.getDatabase(['seperateModelsForAxModels', 'seperateModels'])
       const memoryModel = (db?.seperateModelsForAxModels ? db?.seperateModels?.memory ?? '' : '').trim()
       return {
         prompt: savedPrompt,
+        defaultPreset: await Risuai.pluginStorage.getItem(DEFAULT_PRESET_KEY),
         memoryModel,
-        modelLabel: memoryModel || db?.subModel || 'RisuAI 기본 보조모델',
-        usesSeparateAuxModels: !!db?.seperateModelsForAxModels
+        modelLabel: memoryModel || 'RisuAI 기본 보조모델'
       }
     }
 
@@ -122,14 +157,21 @@
       await Risuai.pluginStorage.setItem(PROMPT_STORAGE_KEY, presets)
     }
 
+    function restoreDefaultPreset(presets, cfg) {
+      if (!cfg.prompt) return -1
+      const saved = cfg.defaultPreset
+      const name = saved?.prompt === cfg.prompt && typeof saved.name === 'string' ? saved.name : null
+      let index = presets.findIndex(p => p.prompt === cfg.prompt && (!name || p.name === name))
+      if (index < 0) {
+        presets.push({ name: name || '기본 요약 프롬프트', prompt: cfg.prompt })
+        index = presets.length - 1
+      }
+      return index
+    }
+
     function extractGigaTransSource(content) {
       const blocks = []
-      const matches = []
-      const pattern = /<GigaTrans\b[^>]*>([\s\S]*?)<\/GigaTrans\s*>/gi
-      let match
-      while ((match = pattern.exec(content)) !== null) {
-        matches.push(match)
-      }
+      const matches = [...content.matchAll(/<GigaTrans\b[^>]*>([\s\S]*?)<\/GigaTrans\s*>/gi)]
 
       if (matches.length === 0) return content
 
@@ -327,14 +369,20 @@
       return extractModelText(payload)
     }
 
-    async function injectSummary(summaryText, chatMemos = []) {
-      const { charIndex, chatIndex, chat } = await getCurrentChat()
-      const existing = chat.hypaV3Data ?? { summaries: [] }
-      if (!Array.isArray(existing.summaries)) existing.summaries = []
-      existing.summaries.push({ text: summaryText, chatMemos, isImportant: false, tags: [] })
-      chat.hypaV3Data = existing
-      clearDerivedMemory(chat)
-      await Risuai.setChatToIndex(charIndex, chatIndex, chat)
+    async function injectSummary(summaryText, chatMemos = [], target) {
+      if (manualBusy) throw new Error('다른 요약 작업이 진행 중입니다.')
+      if (!target) throw new Error('요약 대상 정보가 없습니다. 다시 요약하세요.')
+      manualBusy = true
+      try {
+        const { charIndex, chatIndex, chat } = await resolveOwner(target.owner)
+        if (messageStamp(chat) !== target.messages || memoryStamp(chat) !== target.memory) throw new Error('요약 이후 대화나 기억이 변경되었습니다. 다시 확인하세요.')
+        const existing = chat.hypaV3Data ?? { summaries: [] }
+        if (!Array.isArray(existing.summaries)) existing.summaries = []
+        existing.summaries.push({ text: summaryText, chatMemos, isImportant: false, tags: [] })
+        chat.hypaV3Data = existing
+        clearDerivedMemory(chat)
+        await Risuai.setChatToIndex(charIndex, chatIndex, chat)
+      } finally { manualBusy = false }
     }
 
     function slotsKey(charId) {
@@ -364,7 +412,8 @@
     }
 
     async function saveSlot(charId, name) {
-      const { chat } = await getCurrentChat()
+      const { char, chat } = await getCharacterContext()
+      if (char.chaId !== charId) throw new Error('캐릭터가 변경되었습니다. 창을 다시 여세요.')
       const data = {
         name,
         timestamp: Date.now(),
@@ -381,14 +430,19 @@
     }
 
     async function loadSlot(charId, name) {
-      const data = await getSlotData(charId, name)
-      if (!data) return false
-      const { charIndex, chatIndex, chat } = await getCurrentChat()
-      chat.hypaV2Data = data.hypaV2Data
-      chat.hypaV3Data = data.hypaV3Data
-      clearDerivedMemory(chat)
-      await Risuai.setChatToIndex(charIndex, chatIndex, chat)
-      return true
+      if (manualBusy) throw new Error('요약 작업 종료 후 슬롯을 불러오세요.')
+      manualBusy = true
+      try {
+        const data = await getSlotData(charId, name)
+        if (!data) throw new Error('슬롯 데이터를 찾을 수 없습니다.')
+        const { char, charIndex, chatIndex, chat } = await getCharacterContext()
+        if (char.chaId !== charId) throw new Error('캐릭터가 변경되었습니다. 창을 다시 여세요.')
+        chat.hypaV2Data = data.hypaV2Data
+        chat.hypaV3Data = data.hypaV3Data
+        clearDerivedMemory(chat)
+        await Risuai.setChatToIndex(charIndex, chatIndex, chat)
+        return true
+      } finally { manualBusy = false }
     }
 
     async function deleteSlot(charId, name) {
@@ -408,36 +462,41 @@
     }
 
     async function splitChatForHypaV3() {
-      const character = await Risuai.getCharacter()
-      const chatIndex = await Risuai.getCurrentChatIndex()
-      const currentChat = character?.chats?.[chatIndex] || character?.chats?.[character.chatPage]
-      const currentMessages = currentChat?.message
-      if (!currentMessages || currentMessages.length === 0) throw new Error('현재 채팅에 메시지가 없습니다.')
+      if (manualBusy) throw new Error('요약 작업 종료 후 채팅을 분할하세요.')
+      manualBusy = true
+      try {
+        const character = await Risuai.getCharacter()
+        const chatIndex = await Risuai.getCurrentChatIndex()
+        const currentChat = character?.chats?.[chatIndex] || character?.chats?.[character.chatPage]
+        const currentMessages = currentChat?.message
+        if (!currentMessages || currentMessages.length === 0) throw new Error('현재 채팅에 메시지가 없습니다.')
 
-      const summaries = currentChat.hypaV3Data?.summaries
-      const lastSummary = summaries?.[summaries.length - 1]
-      if (!lastSummary) throw new Error('현재 채팅에 hypaV3 요약 데이터가 없습니다.')
+        const summaries = currentChat.hypaV3Data?.summaries
+        const lastSummary = summaries?.[summaries.length - 1]
+        if (!lastSummary) throw new Error('현재 채팅에 hypaV3 요약 데이터가 없습니다.')
 
-      const lastChatId = [...(lastSummary.chatMemos || [])].at(-1)
-      if (!lastChatId) throw new Error('마지막 요약에 연결된 채팅 ID가 없습니다.')
+        const lastChatId = lastSummary.chatMemos?.at(-1)
+        if (!lastChatId) throw new Error('마지막 요약에 연결된 채팅 ID가 없습니다.')
 
-      const lastChatIndex = currentMessages.findIndex(m => m.chatId === lastChatId)
-      if (lastChatIndex === -1) throw new Error('마지막 요약과 연결된 메시지를 찾지 못했습니다.')
-      if (currentMessages.length === lastChatIndex + 1) throw new Error('요약되지 않은 새 메시지가 없어 분할할 필요가 없습니다.')
+        const lastChatIndex = currentMessages.findIndex(m => m.chatId === lastChatId)
+        if (lastChatIndex === -1) throw new Error('마지막 요약과 연결된 메시지를 찾지 못했습니다.')
+        if (currentMessages.length === lastChatIndex + 1) throw new Error('요약되지 않은 새 메시지가 없어 분할할 필요가 없습니다.')
 
-      const summarizedChat = structuredClone(currentChat)
-      summarizedChat.name = (summarizedChat.name || 'Chat') + ' 요약'
-      summarizedChat.message.splice(lastChatIndex + 1)
+        const summarizedChat = structuredClone(currentChat)
+        summarizedChat.name = (summarizedChat.name || 'Chat') + ' 요약'
+        summarizedChat.message.splice(lastChatIndex + 1)
 
-      const unsummarizedChat = structuredClone(currentChat)
-      unsummarizedChat.name = (unsummarizedChat.name || 'Chat') + ' 비요약'
-      unsummarizedChat.message.splice(0, lastChatIndex)
+        const unsummarizedChat = structuredClone(currentChat)
+        unsummarizedChat.name = (unsummarizedChat.name || 'Chat') + ' 비요약'
+        unsummarizedChat.message.splice(0, lastChatIndex)
 
-      const originalBackupChat = structuredClone(currentChat)
-      originalBackupChat.name = (originalBackupChat.name || 'Chat') + ' 원본 백업'
+        const originalBackupChat = structuredClone(currentChat)
+        originalBackupChat.name = (originalBackupChat.name || 'Chat') + ' 원본 백업'
 
-      character.chats.unshift(originalBackupChat, summarizedChat, unsummarizedChat)
-      await Risuai.setCharacter(character)
+        for (const copy of [originalBackupChat, summarizedChat, unsummarizedChat]) copy.id = crypto.randomUUID()
+        character.chats.unshift(originalBackupChat, summarizedChat, unsummarizedChat)
+        await Risuai.setCharacter(character)
+      } finally { manualBusy = false }
     }
 
     function setLoading(on) {
@@ -488,7 +547,7 @@
     function buildUI(messages, cfg, presets, slots, char) {
       const total = messages.length
       const selectableTotal = messages.filter(m => m.role !== 'system').length
-      const modelLabel = cfg.modelLabel
+      const modelLabel = String(cfg.modelLabel ?? '').replaceAll('pluginmodel:::', '')
       const charName = char?.name || '캐릭터'
 
       const msgRows = total === 0
@@ -544,11 +603,13 @@
         '}' +
 
         /* ── 기본 레이아웃 ── */
-        'html, body { width: 100%; height: 100%; background: transparent; }' +
+        'html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }' +
         'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: var(--c-text); display: flex; align-items: center; justify-content: center; }' +
 
         /* ── 패널 ── */
-        '.panel { background: var(--c-bg); border: 1px solid var(--c-border); border-radius: var(--radius-lg); padding: 26px 26px 22px; width: min(800px, 96vw); max-height: 92vh; overflow-y: auto; box-shadow: var(--shadow-panel); display: flex; flex-direction: column; gap: 18px; }' +
+        '.panel { background: var(--c-bg); border: 1px solid var(--c-border); border-radius: var(--radius-lg); padding: 26px 26px 22px; width: min(800px, 96vw); max-height: 92vh; max-height: 92dvh; min-height: 0; overflow: hidden; box-shadow: var(--shadow-panel); display: flex; flex-direction: column; gap: 18px; }' +
+        '.panel > .header, .panel > .tabs { flex-shrink: 0; }' +
+        '.header-left, .header-left > div:last-child { min-width: 0; overflow-wrap: anywhere; }' +
 
         /* ── 헤더 ── */
         '.header { display: flex; justify-content: space-between; align-items: center; gap: 16px; border-bottom: 1px solid var(--c-border); padding-bottom: 16px; }' +
@@ -566,7 +627,8 @@
         '.tab-btn { background: none; border: none; border-bottom: 2px solid transparent; color: var(--c-text-dim); font-size: 13px; font-weight: 500; padding: 8px 16px; cursor: pointer; white-space: nowrap; transition: color .15s, border-color .15s; flex-shrink: 0; margin-bottom: -1px; font-family: inherit; }' +
         '.tab-btn:hover { color: var(--c-text); }' +
         '.tab-btn.active { color: var(--c-accent); border-bottom-color: var(--c-accent); font-weight: 600; }' +
-        '.tab-panel { display: none; flex-direction: column; gap: 14px; padding-top: 2px; }' +
+        '.tab-panel { display: none; flex-direction: column; gap: 14px; padding-top: 2px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }' +
+        '.tab-panel > * { flex-shrink: 0; }' +
         '.tab-panel.active { display: flex; }' +
 
         /* ── 섹션 헤더 ── */
@@ -683,37 +745,38 @@
         '<div class="panel">' +
           '<div class="header"><div class="header-left"><div class="header-icon">✨</div><div><h2>Hypa Manager</h2><div class="sub"><span class="badge">' + esc(modelLabel) + '</span><span class="sub-dot">·</span>' + esc(charName) + '<span class="sub-dot">·</span>' + total + '개 항목</div></div></div><button id="btn-close">닫기</button></div>' +
           '<div class="tabs">' +
-            '<button class="tab-btn active" data-tab="tab-summarize">요약</button>' +
-            '<button class="tab-btn" data-tab="tab-prompt">프롬프트</button>' +
+            '<button class="tab-btn active" data-tab="tab-summarize">수동 요약</button>' +
+            '<button class="tab-btn" data-tab="tab-prompt">요약 프롬프트</button>' +
             '<button class="tab-btn" data-tab="tab-memory">메모리</button>' +
             '<button class="tab-btn" data-tab="tab-split">챗 분할</button>' +
           '</div>' +
 
           '<div id="tab-summarize" class="tab-panel active">' +
-            '<div class="info-banner">RisuAI 설정에서 보조모델 분리를 켜고 memory 모델에 원하는 모델을 선택하세요. 분리가 꺼져 있거나 memory 모델이 비어 있으면 기본 보조모델을 사용합니다. 프로바이더 플러그인으로 설정한 모델도 사용할 수 있습니다.</div>' +
+            '<div class="info-banner">RisuAI에 설정된 장기기억 보조모델 혹은 기본 보조모델을 사용합니다. 프로바이더 플러그인으로 설정한 모델도 사용할 수 있습니다.</div>' +
             '<div><div class="section-head"><div class="section-title">요약할 채팅 선택</div><div class="select-tools"><span class="hint" id="selection-hint">총 0개 선택</span><button class="mini-btn" id="btn-select-all" type="button">전체 선택</button><button class="mini-btn" id="btn-clear-all" type="button">전체 해제</button></div></div>' +
               '<div class="range-tools"><label for="range-start">시작 번호<input id="range-start" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: 0"></label><label for="range-end">끝 번호<input id="range-end" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: ' + Math.max(0, total - 1) + '"></label><button class="mini-btn" id="btn-select-range" type="button"' + (selectableTotal === 0 ? ' disabled' : '') + '>구간 선택</button></div>' +
               '<div class="hint">아래 목록의 번호 기준(0부터 시작). 구간 선택을 누르면 기존 선택이 해당 구간으로 바뀝니다. 선택 확인 후 요약 실행을 누르세요.</div><div id="range-msg" class="msg-status" role="status" aria-live="polite"></div>' +
               '<div class="msg-preview">' + msgRows + '</div></div>' +
             '<div id="result-wrap" style="display:none"><div class="section-title">요약 결과</div><textarea class="result-editor" id="result-box"></textarea><div class="hint">저장 전에 요약문을 직접 수정할 수 있습니다. 저장하면 현재 채팅의 hypaV3 요약 목록에 추가됩니다.</div></div>' +
-            '<div class="btn-row"><button class="btn btn-main" id="btn-run">요약 실행</button><button class="btn btn-alt" id="btn-inject" style="display:none">hypaV3에 추가</button></div><div id="spinner">memory 보조모델로 요약 중...</div><div class="msg-status" id="msg"></div>' +
+            '<div class="btn-row"><button class="btn btn-main" id="btn-run">요약 실행</button><button class="btn btn-alt" id="btn-inject" style="display:none">hypaV3에 추가</button></div><div id="spinner">요약 중...</div><div class="msg-status" id="msg"></div>' +
           '</div>' +
 
           '<div id="tab-prompt" class="tab-panel">' +
-            '<div><div class="section-title">프롬프트 프리셋</div><div class="preset-picker"><select id="preset-select">' + renderPresetOptions(presets) + '</select><div class="preset-actions"><button class="btn btn-muted" id="btn-load-preset" type="button">불러오기</button><button class="btn btn-muted" id="btn-import-json" type="button">JSON 가져오기</button><button class="btn btn-danger" id="btn-delete-preset" type="button">삭제</button></div><input type="file" id="json-input" accept=".json,application/json"></div></div>' +
-            '<div><div class="section-title">프리셋 이름</div><input id="preset-name" type="text" placeholder="예: 짧은 장기기억 요약"></div>' +
-            '<div><div class="section-title">요약 프롬프트</div><textarea id="prompt-input" rows="10" placeholder="프롬프트를 입력하거나 프리셋/JSON에서 불러오세요.">' + esc(cfg.prompt) + '</textarea></div>' +
-            '<div class="btn-row"><button class="btn btn-main" id="btn-save-preset" type="button">프리셋 저장</button><button class="btn btn-alt" id="btn-save-default" type="button">기본값 저장</button></div><div class="hint">요약 실행은 항상 RisuAI의 memory 보조모델 설정을 사용합니다.</div><div class="msg-status" id="prompt-msg"></div>' +
+            '<div><div class="section-title">요약 프롬프트 프리셋</div><div class="preset-picker"><select id="preset-select">' + renderPresetOptions(presets) + '</select><div class="preset-actions"><button class="btn btn-alt" id="btn-save-default" type="button">기본값 저장</button><button class="btn btn-muted" id="btn-import-json" type="button">JSON 가져오기</button><button class="btn btn-danger" id="btn-delete-preset" type="button">삭제</button></div><input type="file" id="json-input" accept=".json,application/json"></div></div>' +
+            '<div><div class="section-title">프리셋 이름</div><input id="preset-name" type="text"></div>' +
+            '<div><div class="section-title">프롬프트</div><textarea id="prompt-input" rows="10" placeholder="프롬프트를 입력하세요.">' + esc(cfg.prompt) + '</textarea></div>' +
+            '<div class="msg-status" id="prompt-msg"></div>' +
           '</div>' +
 
           '<div id="tab-memory" class="tab-panel">' +
             '<div class="slot-save"><input id="slot-name-input" type="text" maxlength="40" placeholder="메모리 슬롯 이름"><span class="hint" id="slot-count">' + slots.length + ' / ' + MAX_SLOTS + '</span><button class="btn btn-main" id="btn-save-slot" type="button">현재 메모리 저장</button></div>' +
+            '<button class="btn btn-muted" id="import-legacy-slots">기존 이름 기반 슬롯 가져오기</button><div class="hint">슬롯은 캐릭터 고유 ID별로 저장됩니다. 같은 캐릭터의 채팅끼리 공유합니다.</div>' +
             '<div id="slot-list">' + renderSlotItems(slots) + '</div><div class="msg-status" id="memory-msg"></div>' +
           '</div>' +
 
           '<div id="tab-split" class="tab-panel">' +
             '<div class="split-card">' +
-              '<div class="desc-box">현재 채팅의 hypaV3 마지막 요약 지점을 기준으로 원본 백업, 요약 채팅, 비요약 채팅을 새로 만듭니다. 고아 메모리 보존 옵션을 켜야 합니다.</div>' +
+              '<div class="desc-box">현재 채팅의 하이파메모리 마지막 요약 지점을 기준으로 원본 백업, 요약 채팅, 비요약 채팅을 새로 만듭니다.<br>고아 메모리 보존 옵션을 켜야 합니다.</div>' +
               '<div><button class="btn btn-alt" id="btn-split-chat" type="button">챗 분할 실행</button></div>' +
               '<div class="hint">생성된 채팅은 채팅 목록 맨 앞에 추가됩니다.</div>' +
             '</div>' +
@@ -771,6 +834,7 @@
       let currentPresets = presets.slice()
       let lastSummary = ''
       let lastSummaryChatMemos = []
+      let lastSummaryTarget = null
 
       document.getElementById('btn-close').addEventListener('click', () => {
         Risuai.hideContainer()
@@ -888,7 +952,12 @@
         document.getElementById('prompt-input').value = preset.prompt
       }
 
+      let defaultIndex = restoreDefaultPreset(currentPresets, cfg)
+      refreshPresetSelect(defaultIndex >= 0 ? defaultIndex : undefined)
+      if (defaultIndex >= 0) putPresetIntoEditor(currentPresets[defaultIndex])
+
       document.getElementById('btn-run').addEventListener('click', async () => {
+        if (manualBusy || summaryRequestActive) { showMsg('msg', '다른 요약 작업이 진행 중입니다.', true); return }
         if (total === 0) {
           showMsg('msg', '메시지가 없습니다.', true)
           return
@@ -904,13 +973,17 @@
           showMsg('msg', '선택한 채팅에 요약할 내용이 없습니다.', true)
           return
         }
+        manualBusy = true
         setLoading(true)
         showMsg('msg', '', false)
         document.getElementById('result-wrap').style.display = 'none'
         document.getElementById('btn-inject').style.display = 'none'
         try {
+          const live = await getCharacterContext()
+          if (live.char.chaId !== char.chaId || live.chat.id !== char.chats?.[char.chatPage]?.id || messageStamp(live.chat) !== messageStamp(char.chats?.[char.chatPage] ?? {})) throw new Error('대상 채팅이 변경되었습니다. 창을 다시 여세요.')
+          lastSummaryTarget = { owner: ownerOf(live.char, live.chat, live.chatIndex), messages: messageStamp(live.chat), memory: memoryStamp(live.chat) }
           const result = await callMemoryModel(cfg, systemPrompt, userContent)
-          lastSummary = stripThoughtTags(result)
+          lastSummary = result
           lastSummaryChatMemos = getChatMemoIds(messages, selectedIndexes)
           document.getElementById('result-box').value = lastSummary
           document.getElementById('result-wrap').style.display = 'block'
@@ -920,6 +993,7 @@
           console.error(e)
           showMsg('msg', '오류: ' + e.message, true)
         } finally {
+          manualBusy = false
           setLoading(false)
         }
       })
@@ -928,7 +1002,7 @@
         const editedSummary = stripThoughtTags(document.getElementById('result-box')?.value ?? lastSummary)
         if (!editedSummary) return
         try {
-          await injectSummary(editedSummary, lastSummaryChatMemos)
+          await injectSummary(editedSummary, lastSummaryChatMemos, lastSummaryTarget)
           lastSummary = editedSummary
           showMsg('msg', 'hypaV3에 추가했습니다.', false)
           document.getElementById('btn-inject').style.display = 'none'
@@ -938,11 +1012,11 @@
         }
       })
 
-      document.getElementById('btn-load-preset').addEventListener('click', () => {
+      document.getElementById('preset-select').addEventListener('change', () => {
         const idx = parseInt(document.getElementById('preset-select').value)
         const preset = currentPresets[idx]
         if (!preset) {
-          showMsg('prompt-msg', '불러올 프리셋을 선택해 주세요.', true)
+          putPresetIntoEditor({ name: '', prompt: '' })
           return
         }
         putPresetIntoEditor(preset)
@@ -964,6 +1038,9 @@
               return
             }
             putPresetIntoEditor(preset)
+            refreshPresetSelect(currentPresets.findIndex(p => p.name === preset.name))
+            const pending = saveEditorPreset()
+            if (pending) pending.catch(() => {})
             showMsg('prompt-msg', '"' + preset.name + '" JSON을 불러왔습니다.', false)
           } catch (err) {
             console.error(err)
@@ -974,47 +1051,71 @@
         }
         reader.readAsText(file)
       })
-      document.getElementById('btn-save-preset').addEventListener('click', async () => {
+      function persistPresetChanges(defaultPreset = null) {
+        // Snapshot each edit and serialize writes, including rename/delete/import.
+        const snapshot = currentPresets.map(p => ({ ...p }))
+        const pending = promptSaveQueue.then(async () => {
+          await savePromptPresets(snapshot)
+          if (defaultPreset) {
+            await Risuai.pluginStorage.setItem(DEFAULT_PRESET_KEY, defaultPreset)
+            await Risuai.setArgument('summary_prompt', defaultPreset.prompt)
+          }
+        })
+        promptSaveQueue = pending.catch(() => {})
+        pending.then(() => showMsg('prompt-msg', '자동 저장 완료', false),
+          error => showMsg('prompt-msg', '자동 저장 실패: ' + error.message, true))
+        return pending
+      }
+
+      function saveEditorPreset(makeDefault = false) {
         const name = document.getElementById('preset-name').value.trim()
-        const prompt = document.getElementById('prompt-input').value.trim()
-        if (!name) {
-          showMsg('prompt-msg', '프리셋 이름을 입력해 주세요.', true)
+        const prompt = document.getElementById('prompt-input').value
+        if (!name || !prompt.trim()) {
+          showMsg('prompt-msg', '이름과 프롬프트를 입력하면 자동 저장됩니다.', true)
           return
         }
-        if (!prompt) {
-          showMsg('prompt-msg', '저장할 프롬프트를 입력해 주세요.', true)
+        let index = parseInt(document.getElementById('preset-select').value)
+        if (!currentPresets[index]) index = currentPresets.length
+        if (currentPresets.some((p, i) => i !== index && p.name === name)) {
+          showMsg('prompt-msg', '같은 이름의 프리셋이 있습니다. 다른 이름을 입력하세요.', true)
           return
         }
-        const existingIndex = currentPresets.findIndex(p => p.name === name)
         const preset = { name, prompt, updatedAt: Date.now() }
-        if (existingIndex >= 0) currentPresets[existingIndex] = preset
-        else currentPresets.push(preset)
-        await savePromptPresets(currentPresets)
-        refreshPresetSelect(existingIndex >= 0 ? existingIndex : currentPresets.length - 1)
-        showMsg('prompt-msg', '프리셋을 저장했습니다.', false)
-      })
-      document.getElementById('btn-delete-preset').addEventListener('click', async () => {
+        currentPresets[index] = preset
+        refreshPresetSelect(index)
+        if (makeDefault) defaultIndex = index
+        const isDefault = index === defaultIndex
+        if (isDefault) {
+          cfg.prompt = prompt.trim()
+          cfg.defaultPreset = { ...preset, prompt: cfg.prompt }
+        }
+        return persistPresetChanges(isDefault ? { ...cfg.defaultPreset } : null)
+      }
+
+      for (const id of ['preset-name', 'prompt-input']) {
+        document.getElementById(id).addEventListener('input', () => {
+          const pending = saveEditorPreset()
+          if (pending) pending.catch(() => {})
+        })
+      }
+      document.getElementById('btn-delete-preset').addEventListener('click', () => {
         const idx = parseInt(document.getElementById('preset-select').value)
-        if (!currentPresets[idx]) {
-          showMsg('prompt-msg', '삭제할 프리셋을 선택해 주세요.', true)
-          return
-        }
+        if (!currentPresets[idx]) return
         currentPresets.splice(idx, 1)
-        await savePromptPresets(currentPresets)
+        if (idx === defaultIndex) defaultIndex = -1
+        else if (idx < defaultIndex) defaultIndex--
         refreshPresetSelect()
-        showMsg('prompt-msg', '프리셋을 삭제했습니다.', false)
+        putPresetIntoEditor({ name: '', prompt: '' })
+        persistPresetChanges().catch(() => {})
       })
-      document.getElementById('btn-save-default').addEventListener('click', async () => {
-        const promptVal = document.getElementById('prompt-input').value.trim()
-        try {
-          await Risuai.setArgument('summary_prompt', promptVal)
-          cfg.prompt = promptVal
-          showMsg('prompt-msg', '기본 프롬프트로 저장했습니다.', false)
-        } catch (e) {
-          showMsg('prompt-msg', '저장 실패: ' + e.message, true)
-        }
+      document.getElementById('btn-save-default').addEventListener('click', () => {
+        const pending = saveEditorPreset(true)
+        if (pending) pending.catch(() => {})
       })
 
+      document.getElementById('import-legacy-slots').addEventListener('click', async () => {
+        try { await importLegacySlots(char) } catch (error) { showMsg('memory-msg', error.message, true) }
+      })
       bindSlotButtons(charId)
       document.getElementById('btn-save-slot').addEventListener('click', async () => {
         const input = document.getElementById('slot-name-input')
@@ -1067,10 +1168,11 @@
     await Risuai.registerButton(
       { name: 'Hypa Manager', icon: '✨️', iconType: 'html', location: 'chat', id: 'hypa-manager-chat' },
       async () => {
-        const { char } = await getCharacterContext()
+        await promptSaveQueue
+        const { char, chat } = await getCharacterContext()
         const charId = getCharId(char)
-        const [messages, cfg, presets, slots] = await Promise.all([
-          getRawMessages(),
+        const messages = getRawMessages(char, chat)
+        const [cfg, presets, slots] = await Promise.all([
           getConfig(),
           loadPromptPresets(),
           getSlotList(charId)
@@ -1081,7 +1183,7 @@
       }
     )
 
-    console.log('[Hypa Manager] Plugin loaded v1.7.8')
+    console.log('[Hypa Manager] Plugin loaded v1.9.11')
   } catch (error) {
     console.log('[Hypa Manager] Error: ' + error.message)
   }
