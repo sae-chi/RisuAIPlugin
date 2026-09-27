@@ -1,7 +1,7 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.10.1
+//@version 1.10.2
 //@arg summary_prompt string Default summary prompt
 
 (async () => {
@@ -473,7 +473,7 @@
 
         const summaries = currentChat.hypaV3Data?.summaries
         const lastSummary = summaries?.[summaries.length - 1]
-        if (!lastSummary) throw new Error('현재 채팅에 hypaV3 요약 데이터가 없습니다.')
+        if (!lastSummary) throw new Error('현재 채팅에 하이파메모리 요약 데이터가 없습니다.')
 
         const lastChatId = lastSummary.chatMemos?.at(-1)
         if (!lastChatId) throw new Error('마지막 요약에 연결된 채팅 ID가 없습니다.')
@@ -757,8 +757,8 @@
               '<div class="range-tools"><label for="range-start">시작 번호<input id="range-start" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: 0"></label><label for="range-end">끝 번호<input id="range-end" type="number" min="0" max="' + Math.max(0, total - 1) + '" step="1" placeholder="예: ' + Math.max(0, total - 1) + '"></label><button class="mini-btn" id="btn-select-range" type="button"' + (selectableTotal === 0 ? ' disabled' : '') + '>구간 선택</button></div>' +
               '<div class="hint">아래 목록의 번호 기준(0부터 시작). 구간 선택을 누르면 기존 선택이 해당 구간으로 바뀝니다. 선택 확인 후 요약 실행을 누르세요.</div><div id="range-msg" class="msg-status" role="status" aria-live="polite"></div>' +
               '<div class="msg-preview">' + msgRows + '</div></div>' +
-            '<div id="result-wrap" style="display:none"><div class="section-title">요약 결과</div><textarea class="result-editor" id="result-box"></textarea><div class="hint">저장 전에 요약문을 직접 수정할 수 있습니다. 저장하면 현재 채팅의 hypaV3 요약 목록에 추가됩니다.</div></div>' +
-            '<div class="btn-row"><button class="btn btn-main" id="btn-run">요약 실행</button><button class="btn btn-alt" id="btn-inject" style="display:none">hypaV3에 추가</button></div><div id="spinner">요약 중...</div><div class="msg-status" id="msg"></div>' +
+            '<div id="result-wrap" style="display:none"><div class="section-title">요약 결과</div><textarea class="result-editor" id="result-box"></textarea><div class="hint">저장 전에 요약문을 직접 수정할 수 있습니다. 저장하면 현재 채팅의 하이파메모리 요약 목록에 추가됩니다.</div></div>' +
+            '<div class="btn-row"><button class="btn btn-main" id="btn-run">요약 실행</button><button class="btn btn-alt" id="btn-inject" style="display:none">하이파메모리에 추가</button></div><div id="spinner">요약 중...</div><div class="msg-status" id="msg"></div>' +
           '</div>' +
 
           '<div id="tab-prompt" class="tab-panel">' +
@@ -1012,7 +1012,7 @@
         try {
           await injectSummary(editedSummary, lastSummaryChatMemos, lastSummaryTarget)
           lastSummary = editedSummary
-          showMsg('msg', 'hypaV3에 추가했습니다.', false)
+          showMsg('msg', '하이파메모리에 추가했습니다.', false)
           document.getElementById('btn-inject').style.display = 'none'
         } catch (e) {
           console.error(e)
@@ -1153,7 +1153,7 @@
       })
 
       document.getElementById('btn-split-chat').addEventListener('click', async () => {
-        if (!confirm('현재 채팅을 마지막 hypaV3 요약 기준으로 분할할까요?')) return
+        if (!confirm('현재 채팅을 마지막 하이파메모리 요약 기준으로 분할할까요?')) return
         try {
           await splitChatForHypaV3()
           showMsg('split-msg', '챗 분할을 완료했습니다.', false)
