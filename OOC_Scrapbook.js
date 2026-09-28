@@ -1098,7 +1098,7 @@
         .list-tools .search-wrap .field { height: 36px; padding-left: 34px; font-size: 12.5px; }
         .list-tools .search-wrap span { left: 11px; font-size: 13px; }
         .list-tools .icon-btn { width: 36px; min-height: 36px; font-size: 15px; }
-        .memo-grid.rows { grid-template-columns: 1fr; grid-auto-rows: auto; gap: 7px; }
+        .memo-grid.rows { grid-template-columns: minmax(0, 1fr); grid-auto-rows: auto; gap: 7px; }
         .memo-grid.rows .memo-card { flex-direction: row; align-items: center; gap: 12px; min-height: 0; padding: 10px 16px; }
         .memo-grid.rows .memo-card::after { display: none; }
         .memo-grid.rows .memo-card:hover { transform: none; }
@@ -1109,7 +1109,8 @@
         .memo-grid:not(.rows) .memo-index { align-self: flex-start; margin-bottom: 5px; }
         .memo-grid.rows .memo-index { flex: 0 0 auto; min-width: 26px; text-align: right; }
         .card-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
-        .memo-grid.rows .card-tags { flex: 0 0 auto; flex-wrap: nowrap; margin: 0; }
+        .memo-grid.rows .card-tags { flex: 0 1 auto; min-width: 0; max-width: 30%; flex-wrap: nowrap; margin: 0; }
+        .memo-grid.rows .card-tags .tag-chip { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .tag-chip { padding: 3px 7px; border: 1px solid var(--blue-border); border-radius: 999px; background: var(--blue-soft); color: var(--blue); font-size: 10px; font-weight: 800; letter-spacing: .02em; }
         .nosrc-chip { padding: 3px 7px; border: 1px dashed rgba(164,78,85,.4); border-radius: 999px; background: transparent; color: var(--danger); font-size: 10px; font-weight: 800; }
         .nosrc-text { color: var(--danger); opacity: .85; }
@@ -1250,6 +1251,36 @@
           .viewer-head .tab { flex: 1 1 0; }
           .memo-tabs-row { padding: 6px; }
           .tab { min-width: 88px; }
+        }
+        /* Compact rows keep titles, tags and metadata on separate tracks. */
+        @media (max-width: 700px) {
+          .topbar { flex: 0 0 auto; flex-wrap: wrap; gap: 8px; }
+          .brand { flex: 1 0 100%; }
+          .brand h1 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; font-size: 19px; }
+          .brand-ver { white-space: nowrap; }
+          .toolbar { width: 100%; min-width: 0; flex-wrap: wrap; gap: 6px; }
+          .toolbar > button { flex: 0 0 auto; white-space: nowrap; }
+          .toolbar [data-action="close"] { margin-left: auto; }
+          .list-tools { gap: 8px; }
+          .search-selection-group { flex: 1 0 100%; width: 100%; }
+          .list-tools .select.slim { flex: 1 1 75px; min-width: 0; max-width: 100%; }
+          .list-tools > .icon-btn { flex: 0 0 36px; }
+          .memo-grid.rows .memo-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 10px; padding: 12px; text-align: left; }
+          .memo-grid.rows .memo-index { grid-column: 1; grid-row: 1; min-width: 20px; text-align: left; }
+          .memo-grid.rows .selection-mark { grid-column: 1; grid-row: 2; align-self: start; }
+          .memo-grid.rows .memo-card h2 { grid-column: 2; grid-row: 1; white-space: normal; overflow-wrap: anywhere; }
+          .memo-grid.rows .card-tags { grid-column: 2; grid-row: 2; min-width: 0; max-width: none; flex-wrap: wrap; }
+          .memo-grid.rows .card-tags .tag-chip { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+          .memo-grid.rows .memo-meta { grid-column: 2; grid-row: 3; min-width: 0; flex-wrap: wrap; gap: 5px 7px; }
+          .memo-grid.rows .memo-meta > span { max-width: 100%; overflow-wrap: anywhere; }
+          .pagination { gap: 5px; flex-wrap: wrap; }
+          .pagination .icon-btn { flex: 0 0 32px; width: 32px; }
+          .pagination > span { font-size: 11px; }
+          .selection-status { flex: 1 0 100%; }
+          .scrapbook { height: calc(100dvh - 20px); }
+        }
+        @media (max-width: 620px) {
+          .scrapbook { height: calc(100dvh - 16px); }
         }
         @media (max-height: 650px) {
           .content.screen-edit { display: block; overflow: auto; }
