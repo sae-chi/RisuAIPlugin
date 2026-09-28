@@ -1,6 +1,6 @@
 //@name ooc_scrapbook
 //@api 3.0
-//@version 1.25.0
+//@version 1.25.1
 //@display-name OOC Scrapbook
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/OOC_Scrapbook.js
 
@@ -14,7 +14,7 @@
   }
 
   const PLUGIN_NAME = 'OOC Scrapbook';
-  const PLUGIN_VERSION = '1.25.0';
+  const PLUGIN_VERSION = '1.25.1';
   const DEFAULT_OOC_TEXT = '(ooc: pause the currently ongoing storyline. And write a complete episode based on the instructions given)';
   const STORAGE_KEY = 'ooc-scrapbook:data:v1';   // 예전 통짜 저장 키 (자동 이전 후 정리)
   const NOTES_KEY = 'ooc-scrapbook:notes:v1';    // 메모 본문 (용량의 99.9%)
