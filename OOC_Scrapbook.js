@@ -1,6 +1,6 @@
 //@name ooc_scrapbook
 //@api 3.0
-//@version 1.25.1
+//@version 1.25.3
 //@display-name OOC Scrapbook
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/OOC_Scrapbook.js
 
@@ -14,7 +14,7 @@
   }
 
   const PLUGIN_NAME = 'OOC Scrapbook';
-  const PLUGIN_VERSION = '1.25.1';
+  const PLUGIN_VERSION = '1.25.0';
   const DEFAULT_OOC_TEXT = '(ooc: pause the currently ongoing storyline. And write a complete episode based on the instructions given)';
   const STORAGE_KEY = 'ooc-scrapbook:data:v1';   // 예전 통짜 저장 키 (자동 이전 후 정리)
   const NOTES_KEY = 'ooc-scrapbook:notes:v1';    // 메모 본문 (용량의 99.9%)
@@ -293,7 +293,7 @@
   function tagSuggestions(query) {
     const q = String(query || '').trim().toLocaleLowerCase();
     const existing = new Set(state.draft?.tags || []);
-    return allTags().filter((tag) => !existing.has(tag) && (!q || tag.toLocaleLowerCase().includes(q))).slice(0, 8);
+    return allTags().filter((tag) => !existing.has(tag) && (!q || tag.toLocaleLowerCase().includes(q)));
   }
 
   function renderTagRow(focus = true) {
@@ -317,8 +317,17 @@
       return;
     }
     if (state.tagSuggestIndex >= items.length) state.tagSuggestIndex = items.length - 1;
+    const previousScroll = box.scrollTop;
     box.hidden = false;
     box.innerHTML = items.map((tag, index) => `<button type="button" class="tag-suggest-item${isGroupTag(tag) ? ' group' : ''}${index === state.tagSuggestIndex ? ' active' : ''}" data-action="pick-tag" data-tag="${escapeAttribute(tag)}">#${escapeHtml(tag)}</button>`).join('');
+    box.scrollTop = previousScroll;
+    const active = box.querySelector('.tag-suggest-item.active');
+    if (active) {
+      const top = active.offsetTop;
+      const bottom = top + active.offsetHeight;
+      if (top < box.scrollTop) box.scrollTop = top;
+      else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
+    }
   }
 
   function allTags() {
@@ -1184,7 +1193,7 @@
         .tag-chip.editable button:hover { opacity: 1; color: var(--danger); }
         #note-tag-input { flex: 1; min-width: 90px; padding: 4px 2px; border: 0; outline: none; background: transparent; color: var(--ink); font: inherit; font-size: 13px; }
         #note-tag-input::placeholder { color: var(--muted); opacity: .62; }
-        .tag-suggest { position: absolute; z-index: 8; top: calc(100% + 4px); left: 0; right: 0; max-height: 190px; overflow: auto; padding: 5px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--surface-solid); box-shadow: var(--shadow); }
+        .tag-suggest { position: absolute; z-index: 8; top: calc(100% + 4px); left: 0; right: 0; max-height: 190px; overflow-y: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--line-strong); border-radius: 11px; background: var(--surface-solid); box-shadow: var(--shadow); }
         .tag-suggest-item { display: block; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); text-align: left; font-size: 12.5px; font-weight: 700; cursor: pointer; }
         .tag-suggest-item:hover, .tag-suggest-item.active { background: var(--accent-soft); color: var(--accent-strong); }
         .trash-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1684,7 +1693,7 @@
           <input id="note-source-url" class="field" type="url" inputmode="url" placeholder="https://example.com" value="${escapeAttribute(state.draft.sourceUrl || '')}">
         </div>
         <div class="form-group editor-tags">
-          <label for="note-tag-input">태그</label>
+          <label>태그</label>
           <div class="tag-editor-wrap">
             <div id="tag-editor" class="field tag-editor" data-action="focus-tag-input"></div>
             <div id="tag-suggest" class="tag-suggest" hidden></div>
