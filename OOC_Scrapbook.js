@@ -1213,13 +1213,14 @@
           --blue-soft: rgba(120,152,170,.15);
           --danger: #e58b92;
           --focus: rgba(200,141,157,.2);
-          --overlay: rgba(10,9,9,.3);
+          --overlay: transparent;
           --topbar: #211f1e;
           --paper-glow: transparent;
           --paper-sheen: transparent;
           --shadow: 0 10px 28px rgba(0,0,0,.4);
           --shadow-soft: 0 1px 2px rgba(0,0,0,.2);
         }
+        :root[data-theme="dark"] input, :root[data-theme="dark"] textarea, :root[data-theme="dark"] select { color-scheme: dark; }
         :root[data-theme="dark"] .memo-tab:hover, :root[data-theme="dark"] .memo-tab-icon:hover { background: rgba(255,255,255,.06); }
         @media (max-width: 820px) {
           .backdrop { padding: 10px; }
@@ -1319,7 +1320,8 @@
       'danger-hover': dark ? '#f2a9ae' : '#8f4148',
     };
     for (const [name, value] of Object.entries(variables)) root.style.setProperty('--' + name, value);
-    root.style.colorScheme = dark ? 'dark' : 'light';
+    // Keep the transparent iframe canvas light; theme native controls separately.
+    root.style.colorScheme = 'light';
     syncThemeControls();
   }
 
