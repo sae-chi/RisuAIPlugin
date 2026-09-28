@@ -1213,7 +1213,7 @@
           --blue-soft: rgba(120,152,170,.15);
           --danger: #e58b92;
           --focus: rgba(200,141,157,.2);
-          --overlay: transparent;
+          --overlay: rgba(28,25,24,.34);
           --topbar: #211f1e;
           --paper-glow: transparent;
           --paper-sheen: transparent;
