@@ -2,7 +2,7 @@
 //@api 3.0
 //@version 1.25.0
 //@display-name OOC Scrapbook
-//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/ooc_scrapbook.js
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/OOC_Scrapbook.js
 
 (async () => {
   'use strict';
