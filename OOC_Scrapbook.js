@@ -1,6 +1,6 @@
 //@name ooc_scrapbook
 //@api 3.0
-//@version 1.25.3
+//@version 1.25.4
 //@display-name OOC Scrapbook
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/OOC_Scrapbook.js
 
@@ -14,7 +14,7 @@
   }
 
   const PLUGIN_NAME = 'OOC Scrapbook';
-  const PLUGIN_VERSION = '1.25.0';
+  const PLUGIN_VERSION = '1.25.4';
   const DEFAULT_OOC_TEXT = '(ooc: pause the currently ongoing storyline. And write a complete episode based on the instructions given)';
   const STORAGE_KEY = 'ooc-scrapbook:data:v1';   // 예전 통짜 저장 키 (자동 이전 후 정리)
   const NOTES_KEY = 'ooc-scrapbook:notes:v1';    // 메모 본문 (용량의 99.9%)
@@ -170,6 +170,7 @@
     editorOocOpen: false,
     page: 1,
     tagFilter: '',
+    languageFilter: '',
     sortMode: 'recent',
     activeMemoTabId: null,
     activeLang: 'ko',
@@ -773,6 +774,7 @@
     const query = state.search.trim().toLocaleLowerCase();
     const notes = [...state.data.notes].filter((note) => {
       if (note.deletedAt) return false;
+      if (state.languageFilter && !noteHasLang(note, state.languageFilter)) return false;
       if (state.tagFilter === '__nosource') {
         if (note.sourceUrl || note.isOriginal) return false;
       } else if (state.tagFilter === '__noooc') {
@@ -1409,6 +1411,11 @@
 
   function renderList(main) {
     const tags = allTags();
+    const filterLanguages = languages();
+    if (state.languageFilter && !filterLanguages.some((lang) => lang.code === state.languageFilter)) {
+      state.languageFilter = '';
+      state.page = 1;
+    }
     if (state.tagFilter && !['__nosource', '__noooc'].includes(state.tagFilter) && !tags.includes(state.tagFilter)) state.tagFilter = '';
     const settings = state.data.settings;
     const rows = settings.viewMode === 'rows';
@@ -1422,7 +1429,8 @@
           <option value="">전체</option>
           <option value="__nosource" ${state.tagFilter === '__nosource' ? 'selected' : ''}>출처 없음만</option>
           <option value="__noooc" ${state.tagFilter === '__noooc' ? 'selected' : ''}>말머리 없음만</option>
-          ${tags.map((tag) => `<option value="${escapeAttribute(tag)}" ${state.tagFilter === tag ? 'selected' : ''}>#${escapeHtml(tag)}</option>`).join('')}
+          ${filterLanguages.map((lang) => `<option value="__lang:${escapeAttribute(lang.code)}" ${state.languageFilter === lang.code ? 'selected' : ''}>${escapeHtml(lang.label)} 내용 있음</option>`).join('')}
+          ${tags.map((tag) => `<option value="__tag:${escapeAttribute(tag)}" ${state.tagFilter === tag ? 'selected' : ''}>#${escapeHtml(tag)}</option>`).join('')}
         </select>
         <select id="list-sort" class="select field slim" aria-label="정렬">
           <option value="recent" ${state.sortMode === 'recent' ? 'selected' : ''}>최신순</option>
@@ -2899,7 +2907,9 @@
         await saveData();
         renderMemoCards();
       } else if (event.target.id === 'list-tag-filter') {
-        state.tagFilter = event.target.value;
+        const value = event.target.value;
+        state.languageFilter = value.startsWith('__lang:') ? value.slice(7) : '';
+        state.tagFilter = state.languageFilter ? '' : value.startsWith('__tag:') ? value.slice(6) : value;
         state.page = 1;
         renderMemoCards();
       } else if (event.target.id === 'list-sort') {
@@ -3016,6 +3026,7 @@
     state.listScroll = 0;
     state.restoreListScroll = false;
     state.tagFilter = '';
+    state.languageFilter = '';
     state.sortMode = 'recent';
     state.draft = null;
     state.deleteModalOpen = false;
