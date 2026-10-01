@@ -1,7 +1,7 @@
 //@name chat_find_replace
 //@display-name 채팅 찾기/바꾸기
 //@api 3.0
-//@version 1.2.0
+//@version 1.3.0
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/chat-find-replace.js
 
 (async () => {
@@ -136,8 +136,15 @@
     if (!findText) return null;
 
     const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const flags = options.caseSensitive ? "g" : "gi";
-    return new RegExp(escaped, flags);
+    const pattern = options.useRegex ? findText : escaped;
+    const flags = (options.caseSensitive ? "g" : "gi") +
+      (options.useRegex && options.multiline ? "m" : "") +
+      (options.useRegex && options.dotAll ? "s" : "");
+    try {
+      return new RegExp(pattern, flags);
+    } catch (error) {
+      throw new Error(`정규식이 올바르지 않습니다: ${error.message}`);
+    }
   }
 
   function roleAllowed(role, options) {
@@ -296,6 +303,7 @@
   }
 
   async function collectGlobalMatches(findText, options) {
+    if (!buildMatcher(findText, options)) return [];
     const db = await api.getDatabase(["characters"]);
     const characters = Array.isArray(db?.characters) ? db.characters : [];
     const matches = [];
@@ -336,7 +344,9 @@
 
     for (const range of ranges) {
       html += escapeHtml(text.slice(cursor, range.start));
-      html += `<mark>${escapeHtml(text.slice(range.start, range.end))}</mark>`;
+      html += range.start === range.end
+        ? '<mark class="zeroWidthMatch" title="빈 문자열 일치" aria-label="빈 문자열 일치"></mark>'
+        : `<mark>${escapeHtml(text.slice(range.start, range.end))}</mark>`;
       cursor = range.end;
     }
 
@@ -367,7 +377,9 @@
     return merged
       .map((window) => {
         const visibleRanges = ranges
-          .filter((range) => range.end > window.start && range.start < window.end)
+          .filter((range) => range.start === range.end
+            ? range.start >= window.start && range.start <= window.end
+            : range.end > window.start && range.start < window.end)
           .map((range) => ({
             start: Math.max(range.start, window.start) - window.start,
             end: Math.min(range.end, window.end) - window.start,
@@ -411,8 +423,8 @@
     document.getElementById("fullTextModalTitle").textContent =
       `전체 보기 · ${match.label || `#${match.messageIndex + 1} - ${roleLabel(match.role)}`}`;
     content.innerHTML = highlightRanges(match.text ?? "", match.ranges || []);
-    modal.showModal();
     document.body.classList.add("viewingFullText");
+    modal.showModal();
     content.scrollTop = 0;
   }
 
@@ -443,14 +455,16 @@
 
     title.textContent = match.label || `#${match.messageIndex + 1} - ${roleLabel(match.role)}`;
     area.value = match.text || "";
+    document.body.classList.add("editingMessage");
     modal.classList.add("open");
-    area.focus();
+    area.focus({ preventScroll: true });
   }
 
   function closeEditModal() {
     state.editingMatch = null;
     state.editingKey = null;
     document.getElementById("editModal").classList.remove("open");
+    document.body.classList.remove("editingMessage");
   }
 
   async function saveEditModal() {
@@ -561,6 +575,9 @@
 
   function readOptions() {
     return {
+      useRegex: document.getElementById("useRegex").checked,
+      multiline: document.getElementById("multiline").checked,
+      dotAll: document.getElementById("dotAll").checked,
       caseSensitive: document.getElementById("caseSensitive").checked,
       includeUser: document.getElementById("includeUser").checked,
       includeAssistant: document.getElementById("includeAssistant").checked,
@@ -809,95 +826,115 @@
   }
 
   async function replaceCurrent() {
-    const replaceText = document.getElementById("replaceText").value;
-    const match = state.matches[state.currentMatch];
+    try {
+      if (state.scope !== "current") return;
+      const findText = document.getElementById("findText").value;
+      const replaceText = document.getElementById("replaceText").value;
+      const options = readOptions();
+      const selected = state.matches[state.currentMatch];
+      // Recompute before writing: a debounced search may still show an older pattern.
+      const matches = collectMatches(findText, options);
+      const match = selected
+        ? matches.find((item) => item.messageIndex === selected.messageIndex)
+        : matches[0];
 
-    if (!match) {
-      renderStatus("바꿀 검색 결과가 선택되지 않았습니다.", "error");
-      return;
+      if (!match) {
+        renderStatus("바꿀 검색 결과가 선택되지 않았습니다.", "error");
+        return;
+      }
+
+      const nextChat = clone(state.chat);
+      const nextMessages = getByPath(nextChat, state.messagePath);
+      const nextMessage = nextMessages[match.messageIndex];
+      const textRef = getMessageTextRef(nextMessage);
+
+      if (!textRef) {
+        renderStatus("선택한 메시지의 텍스트를 읽지 못했습니다.", "error");
+        return;
+      }
+
+      const firstRange = match.ranges && match.ranges[0];
+      if (!firstRange) {
+        renderStatus("선택한 메시지에 바꿀 항목이 없습니다.", "error");
+        return;
+      }
+
+      const matcher = buildMatcher(findText, options);
+      // Keep the full input so lookarounds and replacement context tokens work.
+      const firstMatcher = new RegExp(matcher.source, matcher.flags.replace("g", ""));
+      const nextText = textRef.value.replace(firstMatcher, options.useRegex ? replaceText : () => replaceText);
+      if (textRef.key === null) nextMessages[match.messageIndex] = nextText;
+      else nextMessage[textRef.key] = nextText;
+
+      await saveChat(nextChat, "replace current");
+      await refreshChat();
+      await runSearch();
+      renderStatus("선택한 항목 1개를 바꿨습니다.", "success");
+    } catch (error) {
+      renderStatus(`바꾸기 실패: ${error.message}`, "error");
     }
-
-    const nextChat = clone(state.chat);
-    const nextMessages = getByPath(nextChat, state.messagePath);
-    const nextMessage = nextMessages[match.messageIndex];
-    const textRef = getMessageTextRef(nextMessage);
-
-    if (!textRef) {
-      renderStatus("선택한 메시지의 텍스트를 읽지 못했습니다.", "error");
-      return;
-    }
-
-    const firstRange = match.ranges && match.ranges[0];
-    if (!firstRange) {
-      renderStatus("선택한 메시지에 바꿀 항목이 없습니다.", "error");
-      return;
-    }
-
-    const nextText = textRef.value.slice(0, firstRange.start) + replaceText + textRef.value.slice(firstRange.end);
-    if (textRef.key === null) nextMessages[match.messageIndex] = nextText;
-    else nextMessage[textRef.key] = nextText;
-
-    await saveChat(nextChat, "replace current");
-    await refreshChat();
-    await runSearch();
-    renderStatus("선택한 항목 1개를 바꿨습니다.", "success");
   }
 
   async function replaceAll() {
-    const findText = document.getElementById("findText").value;
-    const replaceText = document.getElementById("replaceText").value;
-    const options = readOptions();
+    try {
+      if (state.scope !== "current") return;
+      const findText = document.getElementById("findText").value;
+      const replaceText = document.getElementById("replaceText").value;
+      const options = readOptions();
 
-    if (!findText) {
-      renderStatus("찾을 단어를 먼저 입력하세요.", "error");
-      return;
+      if (!findText) {
+        renderStatus("찾을 단어를 먼저 입력하세요.", "error");
+        return;
+      }
+
+      const range = readRange();
+      if (range.error) {
+        renderStatus(range.error, "error");
+        return;
+      }
+      if (range.empty) {
+        renderStatus("해당 범위에 바꿀 항목이 없습니다.", "error");
+        return;
+      }
+
+      const matcher = buildMatcher(findText, options);
+      const nextChat = clone(state.chat);
+      const nextMessages = getByPath(nextChat, state.messagePath);
+      let replacements = 0;
+      let changedMessages = 0;
+
+      nextMessages.slice(range.startIndex, range.endIndex).forEach((message, offset) => {
+        const messageIndex = range.startIndex + offset;
+        const role = getRole(message);
+        if (!roleAllowed(role, options)) return;
+
+        const textRef = getMessageTextRef(message);
+        if (!textRef) return;
+
+        const foundCount = countOccurrences(textRef.value, findText, options);
+        if (!foundCount) return;
+
+        replacements += foundCount;
+        changedMessages += 1;
+        matcher.lastIndex = 0;
+
+        const nextText = textRef.value.replace(matcher, options.useRegex ? replaceText : () => replaceText);
+        if (textRef.key === null) nextMessages[messageIndex] = nextText;
+        else message[textRef.key] = nextText;
+      });
+
+      if (!replacements) {
+        renderStatus("바꿀 항목이 없습니다.", "error");
+        return;
+      }
+
+      await saveChat(nextChat, `replace all: ${replacements}`);
+      await refreshChat();
+      await runSearch();
+      renderStatus(`${changedMessages}개 메시지에서 ${replacements}개 항목을 바꿨습니다.`, "success");
+    } catch (error) {
+      renderStatus(`바꾸기 실패: ${error.message}`, "error");
     }
-
-    const range = readRange();
-    if (range.error) {
-      renderStatus(range.error, "error");
-      return;
-    }
-    if (range.empty) {
-      renderStatus("해당 범위에 바꿀 항목이 없습니다.", "error");
-      return;
-    }
-
-    const matcher = buildMatcher(findText, options);
-    const nextChat = clone(state.chat);
-    const nextMessages = getByPath(nextChat, state.messagePath);
-    let replacements = 0;
-    let changedMessages = 0;
-
-    nextMessages.slice(range.startIndex, range.endIndex).forEach((message, offset) => {
-      const messageIndex = range.startIndex + offset;
-      const role = getRole(message);
-      if (!roleAllowed(role, options)) return;
-
-      const textRef = getMessageTextRef(message);
-      if (!textRef) return;
-
-      const foundCount = countOccurrences(textRef.value, findText, options);
-      if (!foundCount) return;
-
-      replacements += foundCount;
-      changedMessages += 1;
-      matcher.lastIndex = 0;
-
-      const nextText = textRef.value.replace(matcher, replaceText);
-      if (textRef.key === null) nextMessages[messageIndex] = nextText;
-      else message[textRef.key] = nextText;
-    });
-
-    if (!replacements) {
-      renderStatus("바꿀 항목이 없습니다.", "error");
-      return;
-    }
-
-    await saveChat(nextChat, `replace all: ${replacements}`);
-    await refreshChat();
-    await runSearch();
-    renderStatus(`${changedMessages}개 메시지에서 ${replacements}개 항목을 바꿨습니다.`, "success");
   }
 
   async function undoLast() {
@@ -938,6 +975,11 @@
     document.getElementById("rangeEnd").value = "";
     renderMatches();
     renderStatus("최근 20개 채팅을 표시했습니다.");
+  }
+
+  function updateRegexOptions() {
+    const enabled = document.getElementById("useRegex").checked;
+    document.getElementById("regexOptions").hidden = !enabled;
   }
 
   function renderUI() {
@@ -1048,12 +1090,16 @@
         input[type="text"]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
         .field { margin-bottom: 16px; }
+        .regexHelp { margin: 0 0 16px; color: var(--text-muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+        .regexHelp p { margin: 6px 0; }
+        .regexHelp .check { margin-right: 8px; }
+        .zeroWidthMatch { padding: 0; border-left: 2px solid var(--mark-text); border-radius: 0; }
         .rangeField { margin-top: 0; }
         .rangeInputs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
         .panelSection { padding-top: 18px; margin-top: 2px; border-top: 1px solid var(--border); }
 
         .checks {
-          display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+          display: grid; grid-template-columns: repeat(2, max-content); align-items: center; gap: 8px 16px;
           margin: 0 0 16px; padding: 10px 12px; background: var(--surface);
           border: 1px solid var(--border); border-radius: var(--radius-sm);
         }
@@ -1121,25 +1167,27 @@
         .editArea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
         .editModal {
-          position: fixed; inset: 0; display: none; place-items: center; padding: 18px;
+          position: fixed; inset: 0; display: none; place-items: center; padding: 16px;
           background: rgba(10, 10, 8, 0.5); backdrop-filter: blur(2px); z-index: 9999;
         }
         .editModal.open { display: grid; }
         .editDialog {
-          width: min(860px, 100%); max-height: min(760px, 92vh); display: grid; grid-template-rows: auto 1fr auto;
+          width: min(860px, calc(100vw - 32px)); max-width: none;
+          height: min(760px, 90vh); height: min(760px, 90dvh); max-height: none;
+          display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
           background: var(--surface); color: var(--text); border: 1px solid var(--border);
           border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-pop);
         }
         .editDialogHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--border); }
         .editDialogHead h2 { margin: 0; font-size: 15px; font-weight: 700; line-height: 1.3; }
         .editDialogClose { width: 32px; height: 32px; min-height: 32px; padding: 0; border-radius: 50%; font-size: 15px; display: grid; place-items: center; }
-        .editDialogBody { padding: 16px 18px; min-height: 0; }
-        .editDialogBody .editArea { height: min(520px, 58vh); min-height: 260px; }
+        .editDialogBody { padding: 16px 18px; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
+        .editDialogBody .editArea { height: 100%; min-height: 0; resize: none; }
         .editDialogActions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 14px 18px; border-top: 1px solid var(--border); }
 
-        body.viewingFullText { overflow: hidden; }
+        body.viewingFullText, body.editingMessage { overflow: hidden; }
         .fullTextDialog {
-          padding: 0; margin: auto; width: min(860px, calc(100% - 32px)); max-height: 90vh; max-height: 90dvh;
+          padding: 0; margin: auto;
           border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-pop);
           background: var(--surface); color: var(--text);
         }
@@ -1149,7 +1197,7 @@
         .fullTextBody { position: relative; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr); }
         .fullTextBody .scrollWidget { position: absolute; z-index: 1; }
         .fullTextDialog::backdrop { background: rgba(10, 10, 8, 0.5); backdrop-filter: blur(2px); }
-        .fullTextContent { padding: 18px 76px 18px 18px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; font-size: 13.5px; line-height: 1.6; }
+        .fullTextContent { padding: 18px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; font-size: 13.5px; line-height: 1.6; }
 
         mark { padding: 0 3px; border-radius: 4px; background: var(--mark-bg); color: var(--mark-text); font-weight: 600; }
 
@@ -1178,11 +1226,11 @@
         <main>
           <section class="panel">
             <div class="field">
-              <label for="findText">찾을 단어</label>
+              <label for="findText">찾을 내용</label>
               <input id="findText" type="text" autocomplete="off" />
             </div>
             <div class="field panelSection currentOnly">
-              <label for="replaceText">바꿀 단어</label>
+              <label for="replaceText">바꿀 내용</label>
               <input id="replaceText" type="text" autocomplete="off" />
             </div>
             <div class="actions currentOnly">
@@ -1202,9 +1250,15 @@
               <button id="recentPreviewBtn">최근 20개 보기</button>
             </div>
             <div class="checks panelSection">
+              <label class="check"><input id="useRegex" type="checkbox" /> 정규식 사용</label>
               <label class="check"><input id="caseSensitive" type="checkbox" /> 대소문자 구분</label>
               <label class="check"><input id="includeUser" type="checkbox" checked /> 사용자</label>
               <label class="check"><input id="includeAssistant" type="checkbox" checked /> 캐릭터</label>
+            </div>
+            <div id="regexOptions" class="regexHelp" hidden>
+              <label class="check"><input id="multiline" type="checkbox" /> 줄마다 ^, $ 적용 (m)</label>
+              <label class="check"><input id="dotAll" type="checkbox" /> .에 줄바꿈 포함 (s)</label>
+              <p>/패턴/flags 대신 패턴만 입력하세요. 모든 일치 항목을 검색하며, 대소문자 구분 옵션이 적용됩니다.</p>
             </div>
             <div id="status" class="status">현재 채팅을 불러오는 중입니다.</div>
           </section>
@@ -1293,7 +1347,11 @@
       });
     });
 
-    ["caseSensitive", "includeUser", "includeAssistant"].forEach((id) => {
+    document.getElementById("useRegex").addEventListener("change", () => {
+      updateRegexOptions();
+      scheduleSearch();
+    });
+    ["caseSensitive", "includeUser", "includeAssistant", "multiline", "dotAll"].forEach((id) => {
       document.getElementById(id).addEventListener("change", scheduleSearch);
     });
   }
