@@ -74,6 +74,8 @@
 
   function findMessageArray(root) {
     if (Array.isArray(root)) return { path: [], messages: root };
+    // RisuAI's message array is authoritative, including when it is empty.
+    if (Array.isArray(root?.message)) return { path: ["message"], messages: root.message };
 
     const queue = [{ value: root, path: [], depth: 0 }];
     let best = null;
@@ -89,6 +91,8 @@
       ];
 
       for (const key of orderedKeys) {
+        // Memory summaries are metadata, never chat message candidates.
+        if (/^(?:hypaV\d+Data|supaMemoryData|lastMemory)$/i.test(key)) continue;
         const child = item.value[key];
         const path = [...item.path, key];
         const score = scoreMessageArray(child);
