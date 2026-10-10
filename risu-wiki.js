@@ -1,7 +1,8 @@
 //@name risu-wiki
 //@api 3.0
-//@version 2.0.0
+//@version 2.2.0
 //@display-name RisuWiki
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/risu-wiki.js
 
 // Standalone RisuAI API v3 plugin. No automatic chat hooks or prompt injection.
 (async () => {
@@ -356,7 +357,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
   const LABELS = {character: '인물', location: '장소', faction: '세력', creature: '생물', item: '물건', concept: '설정', scene: '현재 장면', event: '사건', other: '기타'};
   const ui = {target: null, repo: null, saved: null, pending: null, rows: [], selected: null, editor: null,
     folderFilter: '', destination: 'default', referenceIds: new Set(), updateIds: new Set(), referenceQuery: '', folderEditor: null, settingsDraft: null,
-    busy: false, controller: null, query: '', typeFilter: '', tab: 'docs', theme: 'light', status: '채팅을 선택하고 위키를 열어 주세요.', from: 1, to: 1, excludeUserMessages: false};
+    busy: false, controller: null, query: '', typeFilter: '', tab: 'docs', theme: 'light', skin: 'default', status: '채팅을 선택하고 위키를 열어 주세요.', from: 1, to: 1, excludeUserMessages: false};
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
   const $ = id => document.getElementById(id);
   const state = () => ui.pending?.state || ui.saved?.state || Core.empty();
@@ -373,11 +374,59 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
   const disabled = condition => condition ? ' disabled' : '';
   const option = (value, text, current) => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(text)}</option>`;
   const THEME_KEY = 'risuwiki:theme';
-  const applyTheme = () => { document.documentElement.dataset.theme = ui.theme; };
+  const applyTheme = () => {
+    document.documentElement.dataset.theme = ui.theme;
+    document.documentElement.dataset.skin = ui.skin;
+  };
   const themeLabel = () => ui.theme === 'light' ? '다크 모드로 전환' : '라이트 모드로 전환';
   const themeIcon = () => `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ui.theme === 'light'
     ? '<path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/>'
     : '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>'}</svg>`;
+  const SKIN_KEY = 'risuwiki:skin';
+  const SKINS = [
+    {id:'default',name:'기본',desc:'흑백 중심의 간결한 기본 UI. 라이트·다크 모드를 지원합니다.'},
+    {id:'cafeblend',name:'CafeBlend',desc:'따뜻한 크림과 커피빛, 부드러운 입체감으로 꾸민 서재입니다.'},
+    {id:'flip7',name:'Flip7',desc:'청록과 골드, 경쾌한 버튼과 또렷한 문서 카드로 꾸몄습니다.'},
+    {id:'voicebox',name:'VoiceBox',desc:'흑백 대비와 날카로운 선, 붉은 강조를 담은 매거진입니다.'},
+  ];
+  const skinPreview = id => {
+    const dark = ui.theme === 'dark';
+    const colors = {
+      default: dark ? ['#111113','#fff','#3f3f46','#fff','#111'] : ['#fafafa','#111','#d4d4d8','#111','#fff'],
+      cafeblend: dark ? ['#2d251f','#f7e9d7','#544337','#d5a77f','#211b17'] : ['#fdf6ec','#3e2723','#e8ddd0','#8b5e3c','#fff'],
+      flip7: dark ? ['#173a3b','#ecf8f5','#356160','#ffd23f','#173f3d'] : ['#e8f6f5','#173f3d','#b4deda','#ffd23f','#173f3d'],
+      voicebox: dark ? ['#171717','#fafafa','#505050','#fafafa','#101010'] : ['#fafafa','#0a0a0a','#d4d4d4','#0a0a0a','#fafafa'],
+    };
+    const [bg,tx,line,accent,on] = colors[id] || colors.default;
+    const radius = id === 'voicebox' ? '0' : '12px';
+    return `<span class="skin-prev" style="background:${bg};color:${tx};border:1px solid ${line};border-radius:${radius}"><b style="font-family:${id === 'cafeblend' ? 'Georgia,serif' : 'inherit'};font-size:22px;${id === 'voicebox' ? 'border-bottom:3px solid #ef4444' : ''}">${esc(SKINS.find(x => x.id === id)?.name || 'RisuWiki')}</b><span class="skin-tabs"><i style="background:${accent};color:${on};border-radius:${radius}">문서</i><i style="border:1px solid ${line};border-radius:${radius}">작성</i></span><span class="skin-line" style="background:${line}"></span></span>`;
+  };
+  const themeMarkup = () => {
+
+    return `<div class="card"><div class="label-md">THEME</div><h2 class="head-lg">테마</h2>
+      <p class="muted">화면 스타일을 고릅니다. 선택은 플러그인 저장소에 기억되며 위키 문서·백업에는 포함되지 않습니다.</p>
+      <div class="skin-grid" role="radiogroup" aria-label="화면 테마">${SKINS.map(s => `<button class="skin-card" role="radio" aria-checked="${s.id === ui.skin}" data-skin-pick="${s.id}">${skinPreview(s.id)}<span class="skin-meta"><span class="skin-head"><span class="skin-name">${esc(s.name)}</span>${s.id === ui.skin ? '<span class="skin-on">✓ 사용 중</span>' : ''}</span><span class="skin-desc">${esc(s.desc)}</span></span></button>`).join('')}</div>
+      <div class="row skin-mode"><span class="label-md">밝기</span><div class="sections">${[['light', '라이트'], ['dark', '다크']].map(([id, label]) => `<button class="sect${ui.theme === id ? ' on' : ''}" data-mode-pick="${id}" aria-pressed="${ui.theme === id}">${label}</button>`).join('')}</div></div>
+    </div>`;
+  };
+  async function setMode(mode) {
+    if (mode !== 'light' && mode !== 'dark') return;
+    ui.theme = mode; applyTheme();
+    const btn = $('theme-toggle'); if (btn) { btn.innerHTML = themeIcon(); btn.setAttribute('aria-label', themeLabel()); btn.title = themeLabel(); }
+    for (const b of document.querySelectorAll('[data-mode-pick]')) {
+      const active = b.dataset.modePick === mode;
+      b.classList.toggle('on', active); b.setAttribute('aria-pressed', String(active));
+    }
+    for (const card of document.querySelectorAll('[data-skin-pick]')) { const prev = card.querySelector('.skin-prev'); if (prev) prev.outerHTML = skinPreview(card.dataset.skinPick); }
+    try { await R.pluginStorage.setItem(THEME_KEY, mode); } catch { /* 저장 실패해도 이번 실행에서는 전환 유지 */ }
+  }
+  async function setSkin(id) {
+    const skin = SKINS.find(s => s.id === id);
+    if (!skin || ui.skin === id) return;
+    ui.skin = id; applyTheme(); render();
+    setStatus(`${skin.name} 테마를 적용했습니다.`);
+    try { await R.pluginStorage.setItem(SKIN_KEY, id); } catch { /* 저장 실패해도 이번 실행에서는 유지 */ }
+  }
   const registrations = [];
   // Display-only cache: never included in wiki state, revisions or exports.
   const translations = new Map();
@@ -511,11 +560,69 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     @media(max-width:760px){.top{padding:16px;flex-wrap:wrap}.tabs,.panel{padding-left:16px;padding-right:16px}.status,.preview-banner{margin-left:16px;margin-right:16px}.reader{padding:24px 20px}.art-head h2,.empty h2,.head-lg{font-size:30px}.diff,.big-actions,.stats{grid-template-columns:1fr}.wide{grid-column:auto}footer{padding:16px}.target{max-width:100%}}
     @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
   `;
+  // ── 테마(스킨) 시스템 ─────────────────────────────────────────────
+  const SHARED_CSS = `
+    .skin-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}
+    .skin-card{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:14px;text-align:left;padding:20px;min-height:0;height:auto;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r)}
+    .skin-card[aria-checked=true]{border-color:var(--tx);box-shadow:0 0 0 1px var(--tx)}
+    .skin-card[aria-checked=true]:hover:not(:disabled){border-color:var(--tx)}
+    .skin-prev{display:flex;flex-direction:column;gap:10px;padding:14px 16px}
+    .skin-prev i{font-style:normal;font-size:12px;padding:4px 12px;line-height:1.3}
+    .skin-tabs{display:flex;gap:6px}
+    .skin-line{display:block;height:6px;width:70%;border-radius:3px}
+    .skin-meta{display:grid;gap:4px}
+    .skin-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+    .skin-name{font-size:16px;font-weight:600}
+    .skin-on{font-size:12px;font-family:var(--mono);color:var(--tx2)}
+    .skin-desc{font-size:13px;line-height:1.6;color:var(--tx2);font-weight:400}
+    .skin-mode{margin-top:20px}
+  `;
+  // Scoped A-layout themes; document state and generation are independent of appearance.
+  const DESIGN_CSS = `
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]){--paper:var(--panel);--ink:var(--tx);--bg2:var(--panel);--line2:var(--line);--hov:var(--inset);--hov2:var(--inset);--bgA:var(--bg);--phov:var(--accent);--pbg:var(--accent);--pfg:var(--on);--head:Georgia,'Batang',serif;--sans:'Work Sans','Noto Sans KR','Malgun Gothic',system-ui,sans-serif;--mono:'IBM Plex Mono',Consolas,monospace}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .shell{max-width:1440px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .top{padding-top:28px;padding-bottom:28px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .brand h1{font-family:var(--head);font-size:30px;color:var(--tx)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .brand-icon{width:32px;height:32px;fill:var(--accent)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .docs-layout{grid-template-columns:300px minmax(0,1fr);gap:28px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .side{padding:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .card{background:var(--panel);color:var(--tx);border-color:var(--line);box-shadow:var(--shadow);border-radius:var(--r)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader{padding:44px 48px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .content{max-width:740px}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h1,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h2,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h3,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h4,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .head-lg{font-family:var(--head)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .head-lg,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .art-head h2,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .empty h2{font-size:38px;line-height:1.25}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article{font-size:16px;line-height:1.9}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article h2{border-top-color:var(--line)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button{min-height:44px;border-radius:var(--control-r);background:var(--panel)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) select:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) summary:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button.primary{background:var(--pbg);color:var(--pfg);border-color:var(--pbg)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button.primary:hover:not(:disabled){background:var(--phov);color:var(--pfg);filter:brightness(.94)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button.ghost{background:transparent}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tab{background:transparent}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tab.on,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .sect.on{background:var(--accent);color:var(--on);border-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tab.on .n{color:var(--on)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) select,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea{min-height:44px;background:var(--inset);color:var(--tx);border-color:var(--line);border-radius:var(--control-r)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input[type=checkbox]{min-height:0;accent-color:var(--accent);width:18px;height:18px}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input:focus,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) select:focus,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea:focus{border-color:var(--accent);outline:2px solid var(--accent);outline-offset:2px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input::placeholder,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea::placeholder{color:var(--tx3)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc{box-shadow:none;background:transparent;border-color:transparent;padding:14px 12px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc.active{background:var(--inset);border-color:transparent;border-left:3px solid var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc small{color:var(--tx2)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc .t{font-size:16px;font-weight:600}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .status{border-left-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .kicker,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .byline,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .empty p,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader .muted,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader label,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader summary,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .diff p,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .sources pre{color:var(--tx2)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .byline,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .sources{border-color:var(--line)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader button:not(.primary):not(.wiki-link){background:var(--panel);color:var(--tx);border-color:var(--line)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader button:hover:not(:disabled):not(.primary):not(.wiki-link){background:var(--inset);border-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader .danger{color:var(--err)!important}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader details,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader pre,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader input,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader select,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader textarea{background:var(--inset);color:var(--tx);border-color:var(--line)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader :focus-visible{outline-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader details[open]>summary{color:var(--tx)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article code,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article pre,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .diff pre{background:var(--inset);color:var(--tx);border-color:var(--line)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .chip{color:var(--tx2);border-color:var(--line);border-radius:var(--control-r)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .chip.lock{background:var(--accent);color:var(--on);border-color:var(--accent)}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .wiki-link{min-height:0;padding:0;background:none;border:0;border-radius:0;color:var(--accent);font:inherit;line-height:inherit}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .wiki-link:hover:not(:disabled){background:none;color:var(--tx);border:0}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-card{color:var(--tx);border-radius:var(--r);min-width:0}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-prev{min-height:120px;justify-content:center}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-card[aria-checked=true]{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-on{color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-head{flex-wrap:wrap}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:20px}
+:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tool{border-radius:var(--r);box-shadow:var(--shadow)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .scroll-tools button{color:var(--tx);background:var(--panel);box-shadow:var(--shadow)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) dialog{box-shadow:var(--shadow)}
+
+:root[data-skin=cafeblend]{--bg:#fdf6ec;--panel:#fffdf9;--inset:#f0e6d6;--tx:#3e2723;--tx2:#796454;--tx3:#796454;--accent:#8b5e3c;--on:#fff;--line:#e8ddd0;--r:16px;--control-r:12px;--shadow:6px 6px 18px #d5c9b866,-6px -6px 18px #ffffff88}
+:root[data-skin=cafeblend][data-theme=dark]{--bg:#211b17;--panel:#2d251f;--inset:#18130f;--tx:#f7e9d7;--tx2:#ceb9a3;--tx3:#ceb9a3;--accent:#d5a77f;--on:#211b17;--line:#544337;--shadow:0 6px 22px #0003}
+:root[data-skin=flip7]{--bg:#eff8f7;--panel:#fff;--inset:#fff8e7;--tx:#173f3d;--tx2:#486b68;--tx3:#486b68;--accent:#16716c;--on:#fff;--line:#b4deda;--r:20px;--control-r:12px;--shadow:0 6px 22px #2ba8a222;--head:'Work Sans','Noto Sans KR','Malgun Gothic',sans-serif}
+:root[data-skin=flip7][data-theme=dark]{--bg:#102b2c;--panel:#173a3b;--inset:#102728;--tx:#ecf8f5;--tx2:#b0cfca;--tx3:#b0cfca;--accent:#66d5cc;--on:#102b2c;--line:#356160}
+:root[data-skin=voicebox]{--bg:#fafafa;--panel:#fafafa;--inset:#f5f5f5;--tx:#0a0a0a;--tx2:#525252;--tx3:#626262;--accent:#0a0a0a;--on:#fafafa;--line:#d4d4d4;--r:0px;--control-r:0px;--shadow:none;--head:'Archivo Black','Arial Black','Malgun Gothic',sans-serif}
+:root[data-skin=voicebox][data-theme=dark]{--bg:#101010;--panel:#171717;--inset:#242424;--tx:#fafafa;--tx2:#bcbcbc;--tx3:#bcbcbc;--accent:#fafafa;--on:#101010;--line:#505050}
+:root[data-skin=cafeblend]{--head:'DM Serif Display',Georgia,'Batang',serif}
+:root[data-skin=cafeblend] input:not([type=checkbox]),:root[data-skin=cafeblend] textarea{box-shadow:inset 2px 2px 5px #8b5e3c18}
+:root[data-skin=flip7] button:not(.doc):not(.skin-card):not(.tool):not(.wiki-link){border-radius:999px}
+:root[data-skin=flip7] .primary{--pbg:#ffd23f;--pfg:#173f3d;--phov:#ffe47a;background:linear-gradient(130deg,#ffe47a,#ffd23f);box-shadow:0 4px 15px #ffd23f44}
+:root[data-skin=flip7] .article h2{border-top-style:dashed}:root[data-skin=flip7] h1,:root[data-skin=flip7] h2,:root[data-skin=flip7] h3{font-weight:800}
+:root[data-skin=voicebox] button,:root[data-skin=voicebox] input,:root[data-skin=voicebox] select,:root[data-skin=voicebox] textarea{border-width:2px;border-radius:0}
+:root[data-skin=voicebox] .tab.on{border-bottom:3px solid #ef4444}:root[data-skin=voicebox] .primary:hover:not(:disabled){background:#ef4444;border-color:#ef4444;color:#fff}
+:root[data-skin=voicebox] h1,:root[data-skin=voicebox] h2,:root[data-skin=voicebox] h3{font-weight:900;letter-spacing:-.02em}
+@media(max-width:900px){:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .docs-layout{grid-template-columns:1fr}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .side{position:static;max-height:none}}
+@media(max-width:760px){:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader{padding:24px 20px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .head-lg,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .art-head h2,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .empty h2{font-size:30px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .side{padding:16px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-grid{grid-template-columns:1fr}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .theme-btn{min-width:44px;width:44px;height:44px}}
+  `;
+  const extraStyle = document.createElement('style');
+  extraStyle.textContent = SHARED_CSS + DESIGN_CSS;
   const fonts = document.createElement('link');
   fonts.rel = 'stylesheet';
-  fonts.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap';
+  fonts.href = 'https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Work+Sans:wght@400;500;600;700;800&family=Archivo+Black&family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap';
   document.head.appendChild(fonts); // 오프라인·차단 환경에서는 CSS의 대체 sans-serif 폰트로 표시됩니다.
   document.head.appendChild(style);
+  document.head.appendChild(extraStyle);
 
   function markdown(body) {
     let inCode = false;
@@ -558,7 +665,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     const s = state(), frozen = ui.busy || !!ui.pending, doc = currentDoc();
     const changed = ui.pending ? s.documents.filter(d => JSON.stringify(d) !== JSON.stringify(ui.saved.state.documents.find(x => x.id === d.id))).length : 0;
     const removed = ui.pending ? ui.saved.state.documents.filter(d => !s.documents.some(x => x.id === d.id)) : [];
-    const TABS = [['docs', '문서', s.documents.length], ['write', '작성', ''], ['settings', '설정', ''], ['data', '데이터', '']];
+    const TABS = [['docs', '문서', s.documents.length], ['write', '작성', ''], ['settings', '설정', ''], ['theme', '테마', ''], ['data', '데이터', '']];
     const panel = (id, inner) => `<section class="panel" id="panel-${id}" role="tabpanel"${ui.tab === id ? '' : ' hidden'}>${inner}</section>`;
     const typeNav = s.documents.length ? `<nav class="sections" aria-label="문서 유형">${[['', '전체', s.documents.length], ...Core.TYPES.map(t => [t, LABELS[t], s.documents.filter(d => d.type === t).length]).filter(x => x[2])].map(([t, label, n]) => `<button class="sect${ui.typeFilter === t ? ' on' : ''}" data-type="${esc(t)}" aria-pressed="${ui.typeFilter === t}">${esc(label)} ${n}</button>`).join('')}</nav>` : '';
     const docsPanel = `<div class="docs-layout"><aside class="side" aria-label="위키 문서 목록">
@@ -593,6 +700,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
           <details><summary>기본 작성 프롬프트 편집</summary><div class="stack"><textarea id="base-prompt" rows="12" maxlength="16000"${disabled(frozen)}>${esc(settings.basePrompt ?? Core.DEFAULT_PROMPT)}</textarea>
             <div class="row"><button id="reset-prompt"${disabled(frozen || !ui.saved)}>기본 문구로 되돌리기</button><span class="muted">되돌리기도 저장 전까지 확정되지 않습니다.</span></div></div></details>
           <div class="row"><button id="save-settings" class="primary"${disabled(frozen || !ui.saved)}>설정 저장</button></div></div></div>`;
+    const themePanel = themeMarkup();
     const dataPanel = `<div class="label-md">DATA</div><h2 class="head-lg">내보내기와 백업</h2>
       <div class="tools-grid">
         <button id="export-md" class="tool"${disabled(!s.documents.length)}><div><b>Markdown 내보내기</b><span>모든 문서를 하나의 .md 파일로 저장합니다.</span></div></button>
@@ -600,11 +708,11 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
         <button id="import-json" class="tool"${disabled(frozen || !ui.saved)}><div><b>백업 가져오기</b><span>공통 문서함 전체를 교체할 초안으로 불러옵니다. v2 백업을 지원합니다.</span></div></button>
         <button id="undo" class="tool"${disabled(frozen || !ui.saved?.history.length)}><div><b>이전 저장으로 복원</b><span>모든 폴더와 문서·채팅 처리 이력을 직전 저장 상태로 되돌립니다.</span></div></button></div>`;
     document.body.innerHTML = `<div class="shell">
-      <header class="top"><div class="brand"><svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2 23 22H1Z"/></svg><h1>RisuWiki</h1></div><div class="target" title="${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '')}">${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '채팅 선택 필요')}</div><div class="row"><button id="theme-toggle" class="pill theme-btn" aria-label="${themeLabel()}" title="${themeLabel()}">${themeIcon()}</button><button id="close" class="pill">닫기</button></div></header>
+      <header class="top"><div class="brand"><svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="${ui.skin === 'default' ? 'M12 2 23 22H1Z' : 'M3 3h7a4 4 0 0 1 2 1 4 4 0 0 1 2-1h7v17h-7a4 4 0 0 0-2 1 4 4 0 0 0-2-1H3Zm2 2v13h5l1 .2V6a2 2 0 0 0-1-1Zm8 1v12.2l1-.2h5V5h-5a2 2 0 0 0-1 1Z'}"/></svg><h1>RisuWiki</h1></div><div class="target" title="${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '')}">${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '채팅 선택 필요')}</div><div class="row"><button id="theme-toggle" class="pill theme-btn" aria-label="${themeLabel()}" title="${themeLabel()}">${themeIcon()}</button></div></header>
       <div class="tabs"><nav class="tab-list" role="tablist" aria-label="위키 메뉴">${TABS.map(([id, label, n]) => `<button class="tab${ui.tab === id ? ' on' : ''}" role="tab" data-tab="${id}" aria-selected="${ui.tab === id}">${label}${n !== '' ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</nav><button id="sticky-close" class="pill tabs-close">닫기</button></div>
       <div id="status" class="status" role="status" aria-live="polite">${esc(ui.status)}</div>
       ${ui.pending ? `<section class="preview-banner"><div class="row"><strong>${ui.pending.partial ? '미저장 부분 초안' : '미저장 초안'} · ${changed}개 문서 변경 · ${removed.length}개 제거</strong><span style="flex:1"></span><button id="apply" class="primary"${disabled(ui.busy)}>초안 저장</button><button id="discard" class="ghost"${disabled(ui.busy)}>초안 버리기</button></div><p class="muted" style="margin:8px 0 0">문서를 선택해 변경 전후를 확인할 수 있습니다. 저장해야 원문 처리 이력도 함께 반영됩니다.</p>${removed.length ? `<details><summary>제거될 기존 문서 확인</summary>${removed.map(d => `<details><summary>${esc(d.title)}</summary><pre style="white-space:pre-wrap">${esc(d.body)}</pre></details>`).join('')}</details>` : ''}</section>` : ''}
-      ${panel('docs', docsPanel)}${panel('write', writePanel)}${panel('settings', settingsPanel)}${panel('data', dataPanel)}
+      ${panel('docs', docsPanel)}${panel('write', writePanel)}${panel('settings', settingsPanel)}${panel('theme', themePanel)}${panel('data', dataPanel)}
       <footer>RisuWiki · 생성은 추가 모델 호출을 사용합니다. 초안은 저장 전까지 메모리에만 있습니다. 동시에 여러 기기에서 같은 위키를 편집하지 마세요.</footer>
       <div class="scroll-tools" role="group" aria-label="페이지 스크롤"><button id="scroll-top" aria-label="맨 위로" title="맨 위로">↑</button><button id="scroll-bottom" aria-label="맨 아래로" title="맨 아래로">↓</button></div><input id="import-file" class="file" type="file" accept="application/json,.json"></div>`;
     bind();
@@ -736,18 +844,16 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
       if ((ui.busy || ui.pending || ui.editor) && !await ask('화면을 닫아도 현재 작업·초안은 이번 플러그인 실행 동안 유지됩니다. 닫을까요?')) return;
       await R.hideContainer();
     };
-    on('close', closeWiki); on('sticky-close', closeWiki);
+    on('sticky-close', closeWiki);
     const scrollPage = bottom => {
       const root = document.scrollingElement || document.documentElement;
       root.scrollTo({top: bottom ? root.scrollHeight : 0, behavior: 'instant'});
     };
     on('scroll-top', () => scrollPage(false)); on('scroll-bottom', () => scrollPage(true));
     on('reload', open);
-    on('theme-toggle', async () => {
-      ui.theme = ui.theme === 'light' ? 'dark' : 'light'; applyTheme();
-      const btn = $('theme-toggle'); if (btn) { btn.innerHTML = themeIcon(); btn.setAttribute('aria-label', themeLabel()); btn.title = themeLabel(); }
-      try { await R.pluginStorage.setItem(THEME_KEY, ui.theme); } catch { /* 저장 실패해도 이번 실행에서는 전환 유지 */ }
-    });
+    on('theme-toggle', () => setMode(ui.theme === 'light' ? 'dark' : 'light'));
+    for (const b of document.querySelectorAll('[data-mode-pick]')) b.addEventListener('click', () => setMode(b.dataset.modePick));
+    for (const b of document.querySelectorAll('[data-skin-pick]')) b.addEventListener('click', () => setSkin(b.dataset.skinPick).catch(e => setStatus(`오류: ${e.message || e}`)));
     const showTab = id => {
       ui.tab = id;
       for (const t of document.querySelectorAll('.tab[data-tab]')) { const on = t.dataset.tab === id; t.classList.toggle('on', on); t.setAttribute('aria-selected', String(on)); }
@@ -980,6 +1086,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     ui.tab = 'docs'; ui.selected = restored.documents[0]?.id || null; ui.folderFilter = ''; setStatus('공통 문서함 전체를 교체할 백업 초안입니다. 폴더·문서·처리 이력을 확인한 뒤 저장하세요.'); render();
   }
   try { const saved = await R.pluginStorage.getItem(THEME_KEY); if (saved === 'light' || saved === 'dark') ui.theme = saved; } catch { /* 기본 라이트 */ }
+  try { const savedSkin = await R.pluginStorage.getItem(SKIN_KEY); if (SKINS.some(x => x.id === savedSkin)) ui.skin = savedSkin; else if (savedSkin) await R.pluginStorage.setItem(SKIN_KEY, 'default'); } catch { /* 기본 스킨 */ }
   applyTheme();
   render();
   try {
