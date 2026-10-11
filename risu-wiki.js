@@ -377,6 +377,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
   const applyTheme = () => {
     document.documentElement.dataset.theme = ui.theme;
     document.documentElement.dataset.skin = ui.skin;
+    ensureFonts(ui.skin);
   };
   const themeLabel = () => ui.theme === 'light' ? '다크 모드로 전환' : '라이트 모드로 전환';
   const themeIcon = () => `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ui.theme === 'light'
@@ -384,27 +385,65 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     : '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/>'}</svg>`;
   const SKIN_KEY = 'risuwiki:skin';
   const SKINS = [
-    {id:'default',name:'기본',desc:'흑백 중심의 간결한 기본 UI. 라이트·다크 모드를 지원합니다.'},
-    {id:'cafeblend',name:'CafeBlend',desc:'따뜻한 크림과 커피빛, 부드러운 입체감으로 꾸민 서재입니다.'},
-    {id:'flip7',name:'Flip7',desc:'청록과 골드, 경쾌한 버튼과 또렷한 문서 카드로 꾸몄습니다.'},
-    {id:'voicebox',name:'VoiceBox',desc:'흑백 대비와 날카로운 선, 붉은 강조를 담은 매거진입니다.'},
+    {id: 'default', name: '기본', desc: '흑백 중심의 간결한 기본 UI입니다. 라이트·다크 모드를 지원합니다.'},
+    {id: 'questui', name: 'QuestUI', desc: '금빛 테두리와 세리프 서체, 짙은 갈색 바탕의 판타지 RPG 스타일입니다. 던전(다크)·양피지(라이트) 지원.'},
+    {id: 'cafeblend', name: 'CafeBlend', desc: '따뜻한 크림색과 커피 브라운, 부드러운 뉴모피즘 입체감의 카페 스타일입니다. 라이트·다크(로스트) 지원.'},
+    {id: 'voicebox', name: 'VoiceBox', desc: '굵은 활자와 흑백 대비, 빨간 포인트 하나. 직각과 두꺼운 테두리의 매거진 스타일입니다. 라이트·다크 지원.'},
+    {id: 'flip7', name: 'Flip7', desc: '틸·골드·코랄의 레트로 보드게임 스타일입니다. 알약형 버튼과 색 광채 그림자, 통통 튀는 반응이 특징입니다. 라이트·다크 지원.'},
   ];
+  const BRAND_ICONS = {
+    default: '<path d="M12 2 23 22H1Z"/>',
+    questui: '<path fill-rule="evenodd" d="M12 2 4 5v6c0 5 3.4 9.4 8 11 4.6-1.6 8-6 8-11V5Zm0 5-3.5 5 3.5 5 3.5-5Z"/>',
+    cafeblend: '<path d="M3 8h14v5a6 6 0 0 1-6 6H9a6 6 0 0 1-6-6Z"/><path d="M17 9.5h1.5a2.5 2.5 0 0 1 0 5H17v-1.8h1.5a.7.7 0 0 0 0-1.4H17Z"/><path d="M6.2 2.5h1.6v3.5H6.2Zm4 0h1.6v3.5h-1.6Z"/>',
+    voicebox: '<path fill-rule="evenodd" d="M2 3h20v14H11l-5 4v-4H2Zm4 4v2h12V7Zm0 4v2h8v-2Z"/>',
+    flip7: [[-24, '#E05C5C'], [-12, '#3A7DC9'], [0, '#5BAD6F'], [12, '#E8B923'], [24, '#A855A8']].map(([a, c]) => `<rect x="8.6" y="2" width="6.8" height="10" rx="1.4" fill="${c}" stroke="#fff" stroke-width=".6" transform="rotate(${a} 12 21)"/>`).join(''),
+  };
+  const brandIcon = () => BRAND_ICONS[ui.skin] || BRAND_ICONS.default;
+  const FONT_URLS = {
+    questui: 'https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Spectral:wght@400;500;600&family=Fira+Code:wght@400&family=Noto+Serif+KR:wght@400;500;700&display=swap',
+    cafeblend: 'https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400&family=Noto+Serif+KR:wght@400;700&family=Noto+Sans+KR:wght@400;500;700&display=swap',
+    voicebox: 'https://fonts.googleapis.com/css2?family=Archivo+Black&family=Work+Sans:wght@400;500;600;700&family=Space+Mono:wght@400&family=Black+Han+Sans&family=Noto+Sans+KR:wght@400;500;700&display=swap',
+  };
+  const fontLinks = {};
+  function ensureFonts(id) {
+    if (!FONT_URLS[id] || fontLinks[id]) return;
+    const link = document.createElement('link');
+    link.rel = 'stylesheet'; link.href = FONT_URLS[id];
+    document.head.appendChild(link); // 오프라인·차단 환경에서는 CSS의 대체 폰트로 표시됩니다.
+    fontLinks[id] = link;
+  }
+  // 테마 탭 카드의 미리보기용 색(실제 스킨 CSS와 별개로 인라인 스타일을 씁니다)
+  const PREVIEWS = {
+    default: {
+      light: {bg: '#fafafa', bd: '1px solid #e4e4e7', r: '8px', tf: "Inter,'Noto Sans KR',sans-serif", tw: 500, tc: '#111', title: 'RisuWiki', on: {bg: '#111', fg: '#fff', r: '9999px'}, off: {bd: '1px solid #d4d4d8', fg: '#52525b', r: '9999px'}, line: '#e4e4e7'},
+      dark: {bg: '#050505', bd: '1px solid #27272a', r: '8px', tf: "Inter,'Noto Sans KR',sans-serif", tw: 500, tc: '#fff', title: 'RisuWiki', on: {bg: '#fff', fg: '#111', r: '9999px'}, off: {bd: '1px solid #3f3f46', fg: '#a1a1aa', r: '9999px'}, line: '#27272a'},
+    },
+    questui: {
+      light: {bg: '#F2E6CC', bd: '1px solid #A08256', top: '2px solid #CA8A04', r: '4px', sh: '0 2px 8px rgba(154,100,10,.2)', tf: "'Cinzel','Noto Serif KR',serif", tw: 700, ls: '.12em', tc: '#8A5A00', title: 'RISUWIKI', on: {bg: '#CA8A04', fg: '#1A0F0A', r: '4px'}, off: {bd: '1px solid #CA8A04', fg: '#8A5A00', r: '4px'}, line: '#A08256'},
+      dark: {bg: '#150E0F', bd: '1px solid #4D3A3C', top: '2px solid #CA8A04', r: '4px', sh: '0 2px 8px rgba(202,138,4,.2)', tf: "'Cinzel','Noto Serif KR',serif", tw: 700, ls: '.12em', tc: '#CA8A04', title: 'RISUWIKI', on: {bg: '#CA8A04', fg: '#1A0F0A', r: '4px'}, off: {bd: '1px solid #CA8A04', fg: '#CA8A04', r: '4px'}, line: '#4D3A3C'},
+    },
+    cafeblend: {
+      light: {bg: '#FDF6EC', bd: '0 solid transparent', r: '12px', sh: '4px 4px 8px #D5C9B8,-4px -4px 8px #FFFFFF', tf: "'DM Serif Display','Noto Serif KR',serif", tw: 400, tc: '#8B5E3C', title: 'RisuWiki', on: {bg: '#8B5E3C', fg: '#fff', r: '9999px'}, off: {bg: '#FAF0E1', bd: '0 solid transparent', fg: '#8B5E3C', r: '9999px'}, line: '#E8DDD0'},
+      dark: {bg: '#1E1612', bd: '0 solid transparent', r: '12px', sh: '4px 4px 8px #120C09,-4px -4px 8px #35271F', tf: "'DM Serif Display','Noto Serif KR',serif", tw: 400, tc: '#D9A878', title: 'RisuWiki', on: {bg: '#C4956A', fg: '#1E1612', r: '9999px'}, off: {bg: '#34261E', bd: '0 solid transparent', fg: '#D9A878', r: '9999px'}, line: '#3C2C23'},
+    },
+    voicebox: {
+      light: {bg: '#FAFAFA', bd: '2px solid #E5E5E5', top: '4px solid #0A0A0A', r: '0', tf: "'Archivo Black','Black Han Sans',Impact,sans-serif", tw: 400, ls: '-.02em', tc: '#0A0A0A', title: 'RISUWIKI', on: {bg: 'transparent', fg: '#0A0A0A', r: '0', x: 'border-bottom:3px solid #EF4444;font-weight:700'}, off: {bd: '2px solid #D4D4D4', fg: '#525252', r: '0'}, line: '#E5E5E5'},
+      dark: {bg: '#0A0A0A', bd: '2px solid #262626', top: '4px solid #FAFAFA', r: '0', tf: "'Archivo Black','Black Han Sans',Impact,sans-serif", tw: 400, ls: '-.02em', tc: '#FAFAFA', title: 'RISUWIKI', on: {bg: 'transparent', fg: '#FAFAFA', r: '0', x: 'border-bottom:3px solid #EF4444;font-weight:700'}, off: {bd: '2px solid #404040', fg: '#A3A3A3', r: '0'}, line: '#262626'},
+    },
+    flip7: {
+      light: {bg: 'linear-gradient(135deg,#23958F,#1B7F7A)', bd: '2px solid #CDE7E4', r: '14px', tf: "-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif", tw: 800, ls: '.06em', tc: '#fff', title: 'RisuWiki', on: {bg: 'linear-gradient(135deg,#FFD23F,#E6B800)', fg: '#2C3E50', r: '999px', x: 'font-weight:800'}, off: {bd: '2px solid rgba(255,255,255,.65)', fg: '#fff', r: '999px', x: 'font-weight:700'}, line: 'rgba(255,255,255,.4)'},
+      dark: {bg: 'linear-gradient(135deg,#1B7F7A,#0F4F4B)', bd: '2px solid #24504B', r: '14px', tf: "-apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif", tw: 800, ls: '.06em', tc: '#fff', title: 'RisuWiki', on: {bg: 'linear-gradient(135deg,#FFD23F,#E6B800)', fg: '#2C3E50', r: '999px', x: 'font-weight:800'}, off: {bd: '2px solid rgba(255,255,255,.5)', fg: '#fff', r: '999px', x: 'font-weight:700'}, line: 'rgba(255,255,255,.3)'},
+    },
+  };
   const skinPreview = id => {
-    const dark = ui.theme === 'dark';
-    const colors = {
-      default: dark ? ['#111113','#fff','#3f3f46','#fff','#111'] : ['#fafafa','#111','#d4d4d8','#111','#fff'],
-      cafeblend: dark ? ['#2d251f','#f7e9d7','#544337','#d5a77f','#211b17'] : ['#fdf6ec','#3e2723','#e8ddd0','#8b5e3c','#fff'],
-      flip7: dark ? ['#173a3b','#ecf8f5','#356160','#ffd23f','#173f3d'] : ['#e8f6f5','#173f3d','#b4deda','#ffd23f','#173f3d'],
-      voicebox: dark ? ['#171717','#fafafa','#505050','#fafafa','#101010'] : ['#fafafa','#0a0a0a','#d4d4d4','#0a0a0a','#fafafa'],
-    };
-    const [bg,tx,line,accent,on] = colors[id] || colors.default;
-    const radius = id === 'voicebox' ? '0' : '12px';
-    return `<span class="skin-prev" style="background:${bg};color:${tx};border:1px solid ${line};border-radius:${radius}"><b style="font-family:${id === 'cafeblend' ? 'Georgia,serif' : 'inherit'};font-size:22px;${id === 'voicebox' ? 'border-bottom:3px solid #ef4444' : ''}">${esc(SKINS.find(x => x.id === id)?.name || 'RisuWiki')}</b><span class="skin-tabs"><i style="background:${accent};color:${on};border-radius:${radius}">문서</i><i style="border:1px solid ${line};border-radius:${radius}">작성</i></span><span class="skin-line" style="background:${line}"></span></span>`;
+    const v = (PREVIEWS[id] || PREVIEWS.default)[ui.theme === 'dark' ? 'dark' : 'light'];
+    const f = v.tf;
+    return `<span class="skin-prev" style="background:${v.bg};border:${v.bd};${v.top ? `border-top:${v.top};` : ''}border-radius:${v.r};box-shadow:${v.sh || 'none'}"><b style="font-family:${f};font-size:16px;font-weight:${v.tw};letter-spacing:${v.ls || 0};color:${v.tc}">${v.title}</b><span class="skin-tabs"><i style="background:${v.on.bg};color:${v.on.fg};border-radius:${v.on.r};font-family:${f};box-shadow:${v.on.sh || 'none'};${v.on.x || ''}">문서</i><i style="background:${v.off.bg || 'transparent'};border:${v.off.bd};color:${v.off.fg};border-radius:${v.off.r};font-family:${f};box-shadow:${v.off.sh || 'none'};${v.off.x || ''}">작성</i></span><span class="skin-line" style="background:${v.line}"></span></span>`;
   };
   const themeMarkup = () => {
-
+    for (const s of SKINS) ensureFonts(s.id); // 미리보기에 서체가 필요하므로 테마 탭을 열 때 불러옵니다.
     return `<div class="card"><div class="label-md">THEME</div><h2 class="head-lg">테마</h2>
-      <p class="muted">화면 스타일을 고릅니다. 선택은 플러그인 저장소에 기억되며 위키 문서·백업에는 포함되지 않습니다.</p>
+      <p class="muted">화면 스타일을 고릅니다. 선택은 이 기기의 플러그인 저장소에만 기억되며 위키 문서·백업에는 포함되지 않습니다.</p>
       <div class="skin-grid" role="radiogroup" aria-label="화면 테마">${SKINS.map(s => `<button class="skin-card" role="radio" aria-checked="${s.id === ui.skin}" data-skin-pick="${s.id}">${skinPreview(s.id)}<span class="skin-meta"><span class="skin-head"><span class="skin-name">${esc(s.name)}</span>${s.id === ui.skin ? '<span class="skin-on">✓ 사용 중</span>' : ''}</span><span class="skin-desc">${esc(s.desc)}</span></span></button>`).join('')}</div>
       <div class="row skin-mode"><span class="label-md">밝기</span><div class="sections">${[['light', '라이트'], ['dark', '다크']].map(([id, label]) => `<button class="sect${ui.theme === id ? ' on' : ''}" data-mode-pick="${id}" aria-pressed="${ui.theme === id}">${label}</button>`).join('')}</div></div>
     </div>`;
@@ -428,7 +467,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     try { await R.pluginStorage.setItem(SKIN_KEY, id); } catch { /* 저장 실패해도 이번 실행에서는 유지 */ }
   }
   const registrations = [];
-  // Display-only cache: never included in wiki state, revisions or exports.
+  // Display state stays in memory; translations persist separately from wiki revisions/exports.
   const translations = new Map();
   const translationLanguage = () => state().settings.translationLanguage || '영어';
   const translationFor = d => {
@@ -561,6 +600,15 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
   `;
   // ── 테마(스킨) 시스템 ─────────────────────────────────────────────
+  // 'default'는 기존 UI 그대로이며, 'questui'는 아래 CSS를 :root[data-skin=questui] 범위 안에서만 덮어씁니다.
+  const Q = ':root[data-skin=questui]';
+  const scopeCss = css => css.split('}').map(rule => {
+    const i = rule.indexOf('{'); if (i < 0) return '';
+    const selector = rule.slice(0, i).split(',').map(s => s.trim()).filter(Boolean)
+      .map(s => s.startsWith('&') ? Q + s.slice(1) : `${Q} ${s}`).join(',');
+    return `${selector}{${rule.slice(i + 1)}}`;
+  }).join('\n');
+  // 테마 탭의 스킨 카드는 두 스킨 모두에서 쓰이므로 범위 제한 없이 둡니다.
   const SHARED_CSS = `
     .skin-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}
     .skin-card{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:14px;text-align:left;padding:20px;min-height:0;height:auto;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r)}
@@ -576,50 +624,483 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     .skin-on{font-size:12px;font-family:var(--mono);color:var(--tx2)}
     .skin-desc{font-size:13px;line-height:1.6;color:var(--tx2);font-weight:400}
     .skin-mode{margin-top:20px}
+    :root:root .tab-list{scrollbar-width:none;-ms-overflow-style:none}
+    :root:root .tab-list::-webkit-scrollbar{display:none;width:0;height:0}
+    @keyframes flip7pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,210,63,0)}50%{box-shadow:0 0 0 4px rgba(255,210,63,.4)}}
   `;
-  // Scoped A-layout themes; document state and generation are independent of appearance.
-  const DESIGN_CSS = `
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]){--paper:var(--panel);--ink:var(--tx);--bg2:var(--panel);--line2:var(--line);--hov:var(--inset);--hov2:var(--inset);--bgA:var(--bg);--phov:var(--accent);--pbg:var(--accent);--pfg:var(--on);--head:Georgia,'Batang',serif;--sans:'Work Sans','Noto Sans KR','Malgun Gothic',system-ui,sans-serif;--mono:'IBM Plex Mono',Consolas,monospace}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .shell{max-width:1440px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .top{padding-top:28px;padding-bottom:28px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .brand h1{font-family:var(--head);font-size:30px;color:var(--tx)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .brand-icon{width:32px;height:32px;fill:var(--accent)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .docs-layout{grid-template-columns:300px minmax(0,1fr);gap:28px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .side{padding:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .card{background:var(--panel);color:var(--tx);border-color:var(--line);box-shadow:var(--shadow);border-radius:var(--r)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader{padding:44px 48px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .content{max-width:740px}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h1,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h2,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h3,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) h4,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .head-lg{font-family:var(--head)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .head-lg,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .art-head h2,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .empty h2{font-size:38px;line-height:1.25}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article{font-size:16px;line-height:1.9}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article h2{border-top-color:var(--line)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button{min-height:44px;border-radius:var(--control-r);background:var(--panel)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) select:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea:focus-visible,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) summary:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button.primary{background:var(--pbg);color:var(--pfg);border-color:var(--pbg)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button.primary:hover:not(:disabled){background:var(--phov);color:var(--pfg);filter:brightness(.94)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) button.ghost{background:transparent}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tab{background:transparent}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tab.on,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .sect.on{background:var(--accent);color:var(--on);border-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tab.on .n{color:var(--on)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) select,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea{min-height:44px;background:var(--inset);color:var(--tx);border-color:var(--line);border-radius:var(--control-r)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input[type=checkbox]{min-height:0;accent-color:var(--accent);width:18px;height:18px}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input:focus,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) select:focus,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea:focus{border-color:var(--accent);outline:2px solid var(--accent);outline-offset:2px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) input::placeholder,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) textarea::placeholder{color:var(--tx3)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc{box-shadow:none;background:transparent;border-color:transparent;padding:14px 12px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc.active{background:var(--inset);border-color:transparent;border-left:3px solid var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc small{color:var(--tx2)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .doc .t{font-size:16px;font-weight:600}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .status{border-left-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .kicker,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .byline,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .empty p,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader .muted,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader label,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader summary,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .diff p,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .sources pre{color:var(--tx2)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .byline,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .sources{border-color:var(--line)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader button:not(.primary):not(.wiki-link){background:var(--panel);color:var(--tx);border-color:var(--line)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader button:hover:not(:disabled):not(.primary):not(.wiki-link){background:var(--inset);border-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader .danger{color:var(--err)!important}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader details,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader pre,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader input,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader select,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader textarea{background:var(--inset);color:var(--tx);border-color:var(--line)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader :focus-visible{outline-color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader details[open]>summary{color:var(--tx)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article code,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .article pre,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .diff pre{background:var(--inset);color:var(--tx);border-color:var(--line)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .chip{color:var(--tx2);border-color:var(--line);border-radius:var(--control-r)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .chip.lock{background:var(--accent);color:var(--on);border-color:var(--accent)}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .wiki-link{min-height:0;padding:0;background:none;border:0;border-radius:0;color:var(--accent);font:inherit;line-height:inherit}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .wiki-link:hover:not(:disabled){background:none;color:var(--tx);border:0}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-card{color:var(--tx);border-radius:var(--r);min-width:0}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-prev{min-height:120px;justify-content:center}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-card[aria-checked=true]{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-on{color:var(--accent)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-head{flex-wrap:wrap}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr));gap:20px}
-:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .tool{border-radius:var(--r);box-shadow:var(--shadow)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .scroll-tools button{color:var(--tx);background:var(--panel);box-shadow:var(--shadow)}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) dialog{box-shadow:var(--shadow)}
+  // QuestUI (questui-DESIGN.md 기반). 색상·타이포·간격·반경·그림자 토큰을 그대로 옮겼습니다.
+  const QUEST_CSS = scopeCss(`
+    &{color-scheme:dark;--q-bg:#150E0F;--q-sf:#211718;--q-rs:#2F2123;--q-bd:#4D3A3C;--q-tx:#F2E8E0;--q-t2:#BEAFA6;--q-t3:#A19088;--q-gl:.08;--q-tex:.02;--q-g:#CA8A04;--q-gr:202,138,4;--q-gt:#CA8A04;--q-g2:#DAA520;--q-g2t:#DAA520;--q-err:#F87171;--q-on:#1A0F0A;--q-onr:#F5E6D3;--q-back:rgba(6,3,3,.82);--q-bga:rgba(21,14,15,.94)}
+    &[data-theme=light]{color-scheme:light;--q-bg:#F2E6CC;--q-sf:#FBF4E4;--q-rs:#E8D8B6;--q-bd:#A08256;--q-tx:#2A170C;--q-t2:#6A5036;--q-t3:#7D6243;--q-gr:154,100,10;--q-gt:#8A5A00;--q-g2:#A8740A;--q-g2t:#6B4400;--q-err:#991B1B;--q-back:rgba(40,25,10,.55);--q-bga:rgba(242,230,204,.94);--q-gl:.149;--q-tex:.035}
+    &{--bg:var(--q-bg);--bg2:var(--q-sf);--panel:var(--q-sf);--line:var(--q-bd);--line2:var(--q-bd);--tx:var(--q-tx);--tx2:var(--q-t2);--tx3:var(--q-t3);--paper:var(--q-sf);--ink:var(--q-tx);--warn:var(--q-gt);--err:var(--q-err);--pbg:#CA8A04;--pfg:#1A0F0A;--phov:#B8780A;--hov:var(--q-rs);--hov2:var(--q-rs);--bgA:var(--q-bga);--wbd:rgba(var(--q-gr),.4);--wbg:rgba(var(--q-gr),.08);--dbd:#B91C1C;--dbg:#991B1B33;--shadow:0 1px 3px rgba(var(--q-gr),.15);--back:var(--q-back);--r:4px;--head:"Cinzel","Noto Serif KR","Batang",serif;--sans:"Spectral","Noto Serif KR","Batang",Georgia,serif;--mono:"Fira Code",ui-monospace,Consolas,monospace;font-size:16px}
+    body{background-color:var(--q-bg);background-image:radial-gradient(ellipse 70% 360px at 50% 0,rgba(var(--q-gr),var(--q-gl)),transparent),repeating-linear-gradient(45deg,rgba(var(--q-gr),var(--q-tex)) 0 1px,transparent 1px 7px);background-attachment:fixed}
+    body::before{content:"";display:block;height:2px;background:linear-gradient(90deg,transparent,var(--q-g) 20%,var(--q-g) 80%,transparent)}
+    .shell{min-height:calc(100vh - 2px)}
+    *{scrollbar-color:var(--q-bd) var(--q-bg);scrollbar-width:thin}
+    ::selection{background:rgba(var(--q-gr),0.333);color:var(--q-tx)}
 
-:root[data-skin=cafeblend]{--bg:#fdf6ec;--panel:#fffdf9;--inset:#f0e6d6;--tx:#3e2723;--tx2:#796454;--tx3:#796454;--accent:#8b5e3c;--on:#fff;--line:#e8ddd0;--r:16px;--control-r:12px;--shadow:6px 6px 18px #d5c9b866,-6px -6px 18px #ffffff88}
-:root[data-skin=cafeblend][data-theme=dark]{--bg:#211b17;--panel:#2d251f;--inset:#18130f;--tx:#f7e9d7;--tx2:#ceb9a3;--tx3:#ceb9a3;--accent:#d5a77f;--on:#211b17;--line:#544337;--shadow:0 6px 22px #0003}
-:root[data-skin=flip7]{--bg:#eff8f7;--panel:#fff;--inset:#fff8e7;--tx:#173f3d;--tx2:#486b68;--tx3:#486b68;--accent:#16716c;--on:#fff;--line:#b4deda;--r:20px;--control-r:12px;--shadow:0 6px 22px #2ba8a222;--head:'Work Sans','Noto Sans KR','Malgun Gothic',sans-serif}
-:root[data-skin=flip7][data-theme=dark]{--bg:#102b2c;--panel:#173a3b;--inset:#102728;--tx:#ecf8f5;--tx2:#b0cfca;--tx3:#b0cfca;--accent:#66d5cc;--on:#102b2c;--line:#356160}
-:root[data-skin=voicebox]{--bg:#fafafa;--panel:#fafafa;--inset:#f5f5f5;--tx:#0a0a0a;--tx2:#525252;--tx3:#626262;--accent:#0a0a0a;--on:#fafafa;--line:#d4d4d4;--r:0px;--control-r:0px;--shadow:none;--head:'Archivo Black','Arial Black','Malgun Gothic',sans-serif}
-:root[data-skin=voicebox][data-theme=dark]{--bg:#101010;--panel:#171717;--inset:#242424;--tx:#fafafa;--tx2:#bcbcbc;--tx3:#bcbcbc;--accent:#fafafa;--on:#101010;--line:#505050}
-:root[data-skin=cafeblend]{--head:'DM Serif Display',Georgia,'Batang',serif}
-:root[data-skin=cafeblend] input:not([type=checkbox]),:root[data-skin=cafeblend] textarea{box-shadow:inset 2px 2px 5px #8b5e3c18}
-:root[data-skin=flip7] button:not(.doc):not(.skin-card):not(.tool):not(.wiki-link){border-radius:999px}
-:root[data-skin=flip7] .primary{--pbg:#ffd23f;--pfg:#173f3d;--phov:#ffe47a;background:linear-gradient(130deg,#ffe47a,#ffd23f);box-shadow:0 4px 15px #ffd23f44}
-:root[data-skin=flip7] .article h2{border-top-style:dashed}:root[data-skin=flip7] h1,:root[data-skin=flip7] h2,:root[data-skin=flip7] h3{font-weight:800}
-:root[data-skin=voicebox] button,:root[data-skin=voicebox] input,:root[data-skin=voicebox] select,:root[data-skin=voicebox] textarea{border-width:2px;border-radius:0}
-:root[data-skin=voicebox] .tab.on{border-bottom:3px solid #ef4444}:root[data-skin=voicebox] .primary:hover:not(:disabled){background:#ef4444;border-color:#ef4444;color:#fff}
-:root[data-skin=voicebox] h1,:root[data-skin=voicebox] h2,:root[data-skin=voicebox] h3{font-weight:900;letter-spacing:-.02em}
-@media(max-width:900px){:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .docs-layout{grid-template-columns:1fr}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .side{position:static;max-height:none}}
-@media(max-width:760px){:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .reader{padding:24px 20px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .head-lg,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .art-head h2,:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .empty h2{font-size:30px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .side{padding:16px}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .skin-grid{grid-template-columns:1fr}:root:is([data-skin=cafeblend],[data-skin=flip7],[data-skin=voicebox]) .theme-btn{min-width:44px;width:44px;height:44px}}
+    h1,h2,h3,h4,.head-lg,.stat b,.tool b,.skin-name{font-family:var(--head);letter-spacing:.02em}
+    .head-lg,.art-head h2,.empty h2{font-weight:700;line-height:1.15}
+    .content>h2{font-weight:600}
+    .card h3{font-size:20px;font-weight:600;line-height:1.3}
+    .muted{color:var(--q-t2);font-size:14px;line-height:1.6}
+    .label-md,.kicker{font-family:var(--head);font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--q-gt)}
+    label{font-size:14px;font-weight:500;color:var(--q-tx)}
+
+    button{font-family:var(--head);font-size:13px;letter-spacing:.04em;color:var(--q-gt);background:transparent;border:1px solid var(--q-g);border-radius:4px;transition:background .3s,border-color .3s,color .3s,box-shadow .3s}
+    button:hover:not(:disabled){background:rgba(var(--q-gr),0.082);border-color:var(--q-g2);color:var(--q-g2t);box-shadow:0 1px 3px rgba(var(--q-gr),0.149)}
+    button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--q-g);outline-offset:2px}
+    button:disabled{opacity:.35;border-color:var(--q-bd);box-shadow:none}
+    .primary{background:var(--q-g);color:var(--q-on);border-color:var(--q-g2);font-weight:700;box-shadow:0 1px 3px rgba(var(--q-gr),0.149)}
+    .primary:hover:not(:disabled){background:#B8780A;color:var(--q-on);border-color:var(--q-g2);box-shadow:0 2px 8px rgba(var(--q-gr),0.2)}
+    .ghost{background:transparent;color:var(--q-t2);border-color:transparent;box-shadow:none}
+    .ghost:hover:not(:disabled){background:var(--q-rs);color:var(--q-tx);border-color:transparent;box-shadow:none}
+    button.danger:not(.ghost){background:#991B1B;color:var(--q-onr);border-color:#B91C1C}
+    button.danger:not(.ghost):hover:not(:disabled){background:#7F1D1D;color:var(--q-onr);border-color:#B91C1C;box-shadow:none}
+    .ghost.danger{color:var(--q-err)}
+    .pill{border-radius:4px}
+
+    input,select,textarea{font-family:var(--sans);font-size:14px;background:var(--q-sf);color:var(--q-tx);border:1px solid var(--q-bd);border-radius:4px;padding:8px 12px;transition:border-color .3s,box-shadow .3s}
+    .card input,.card select,.card textarea,.reader input,.reader select,.reader textarea,.folder-editor input,details input,details select,details textarea{background:var(--q-bg)}
+    input::placeholder,textarea::placeholder{color:var(--q-t3)}
+    input:hover:not(:disabled),select:hover:not(:disabled),textarea:hover:not(:disabled){border-color:var(--q-g)}
+    input:focus,select:focus,textarea:focus{border-color:var(--q-g);box-shadow:0 0 0 1px var(--q-g),0 0 0 4px rgba(var(--q-gr),0.251);outline:none}
+    input:disabled,select:disabled,textarea:disabled{background:var(--q-bg);border-color:var(--q-rs);opacity:.6;box-shadow:none}
+    .range input[type=number],.editor .body{font-family:var(--mono)}
+    input[type=checkbox]{-webkit-appearance:none;appearance:none;width:20px;height:20px;min-height:0;padding:0;flex-shrink:0;cursor:pointer;background-color:var(--q-sf);background-repeat:no-repeat;background-position:center;background-size:14px;border:2px solid var(--q-bd);border-radius:2px;box-shadow:none}
+    input[type=checkbox]:checked{background-color:var(--q-g);border-color:var(--q-g);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3.2L13 4.5' fill='none' stroke='%231A0F0A' stroke-width='2.4' stroke-linecap='square'/%3E%3C/svg%3E")}
+    input[type=checkbox]:indeterminate{background-color:var(--q-g);border-color:var(--q-g);background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8h9' fill='none' stroke='%231A0F0A' stroke-width='2.4' stroke-linecap='square'/%3E%3C/svg%3E")}
+    input[type=checkbox]:disabled{opacity:.35;cursor:not-allowed}
+
+    .top{background:linear-gradient(180deg,var(--q-sf),var(--q-bg));border-bottom:1px solid rgba(var(--q-gr),0.4)}
+    .brand h1{color:var(--q-gt);font-weight:700;letter-spacing:.12em;text-shadow:0 0 18px rgba(var(--q-gr),0.333)}
+    .brand-icon{fill:var(--q-gt);filter:drop-shadow(0 0 6px rgba(var(--q-gr),0.4))}
+    .target{border-radius:2px;border-color:var(--q-bd);color:var(--q-t2)}
+    .tabs{border-bottom:1px solid var(--q-bd)}
+    .tab-list{padding:6px 8px;margin:-6px -8px}
+    .tab{color:var(--q-t2);background:transparent;border-color:transparent;border-radius:4px;letter-spacing:.05em}
+    .tab .n{font-family:var(--mono);color:var(--q-t3)}
+    .tab:hover:not(:disabled):not(.on){background:var(--q-rs);color:var(--q-tx);border-color:transparent;box-shadow:none}
+    .tab.on{background:var(--q-g);color:var(--q-on);border-color:var(--q-g2);font-weight:700;box-shadow:0 0 8px rgba(var(--q-gr),0.4)}
+    .tab.on .n{color:var(--q-on);opacity:.7}
+    .status{background:var(--q-sf);border-color:var(--q-bd);border-left:3px solid var(--q-g);border-radius:4px;color:var(--q-t2);font-size:14px}
+    .preview-banner{border-radius:4px;border-top:2px solid var(--q-g)}
+    .preview-banner strong{font-family:var(--head);letter-spacing:.03em}
+
+    .card{background:var(--q-sf);border:1px solid var(--q-bd);border-top:2px solid var(--q-g);border-radius:4px;box-shadow:0 1px 3px rgba(var(--q-gr),0.149)}
+    .stat{background:var(--q-bg);border-color:var(--q-bd);border-radius:4px}
+    .stat b{color:var(--q-gt)}
+    .stat span{color:var(--q-t2)}
+    .tool{background:var(--q-sf);color:var(--q-tx);border-color:var(--q-bd);box-shadow:0 1px 3px rgba(var(--q-gr),0.149)}
+    .tool:hover:not(:disabled){background:var(--q-rs);color:var(--q-tx);border-color:rgba(var(--q-gr),0.251);box-shadow:0 4px 16px rgba(var(--q-gr),0.251)}
+    .tool span{font-family:var(--sans);font-size:14px;letter-spacing:0;color:var(--q-t2)}
+    details{background:var(--q-sf);border-color:var(--q-bd);border-radius:4px}
+    summary{font-family:var(--head);letter-spacing:.03em;color:var(--q-t2)}
+    details[open]>summary{color:var(--q-tx)}
+    .folder-editor{border-radius:4px}
+    .reference-item{border-top-color:var(--q-rs)}
+    .reference-item small{color:var(--q-t3)}
+
+    .sect,.chip{font-family:var(--head);font-size:11px;font-weight:400;letter-spacing:1px;text-transform:uppercase;border-radius:2px;padding:4px 12px}
+    .sect{min-height:28px;background:var(--q-sf);color:var(--q-t2);border:1px solid var(--q-bd);box-shadow:none}
+    .sect:hover:not(:disabled):not(.on){background:var(--q-rs);color:var(--q-tx);border-color:var(--q-bd);box-shadow:none}
+    .sect.on{background:var(--q-g);color:var(--q-on);border-color:var(--q-g);box-shadow:0 0 10px rgba(var(--q-gr),0.4)}
+    .sect.on:hover:not(:disabled){background:#B8780A;color:var(--q-on);border-color:var(--q-g)}
+    .chip{border:1px solid var(--q-bd);color:var(--q-t2)}
+    .chip.lock{background:#581C87;color:var(--q-onr);border-color:rgba(var(--q-gr),0.4)}
+
+    .doc-list{gap:0;padding-right:0;background:var(--q-sf);border:1px solid var(--q-bd);border-radius:4px}
+    .doc-list:empty{display:none}
+    .doc{font-family:var(--sans);font-size:16px;letter-spacing:0;color:var(--q-tx);background:transparent;border:0;border-bottom:1px solid var(--q-rs);border-radius:0;padding:10px 16px;box-shadow:none}
+    .doc:last-child{border-bottom:0}
+    .doc:hover:not(:disabled){background:var(--q-rs);color:var(--q-tx);border-color:transparent transparent var(--q-rs);box-shadow:none}
+    .doc.active{background:rgba(var(--q-gr),0.051);border-color:transparent transparent var(--q-rs);box-shadow:inset 2px 0 0 var(--q-g)}
+    .doc.active:hover:not(:disabled){background:rgba(var(--q-gr),0.149);box-shadow:inset 2px 0 0 var(--q-g)}
+    .doc small{font-family:var(--head);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--q-gt)}
+    .doc .t{font-size:16px;font-weight:400}
+
+    .reader{position:relative;background:var(--q-sf);color:var(--q-tx);border:1px solid rgba(var(--q-gr),0.251);border-top:2px solid var(--q-g);border-radius:4px;box-shadow:0 4px 16px rgba(var(--q-gr),0.251)}
+    .reader::before{content:"";position:absolute;inset:8px;border:1px solid rgba(var(--q-gr),0.149);border-radius:2px;pointer-events:none}
+    .reader button:not(.primary):not(.wiki-link){color:var(--q-gt);border-color:var(--q-g);background:transparent}
+    .reader button:hover:not(:disabled):not(.primary):not(.wiki-link){background:rgba(var(--q-gr),0.082);border-color:var(--q-g2);color:var(--q-g2t)}
+    .reader button:disabled:not(.primary):not(.wiki-link){border-color:var(--q-bd)}
+    .reader button.ghost:not(.primary):not(.wiki-link){color:var(--q-t2);border-color:transparent}
+    .reader button.ghost:hover:not(:disabled):not(.primary):not(.wiki-link){background:var(--q-rs);color:var(--q-tx);border-color:transparent}
+    .reader button.danger:not(.ghost):not(.primary):not(.wiki-link){background:#991B1B;color:var(--q-onr);border-color:#B91C1C}
+    .reader button.danger:not(.ghost):hover:not(:disabled):not(.primary):not(.wiki-link){background:#7F1D1D;color:var(--q-onr);border-color:#B91C1C}
+    .reader .danger{color:var(--q-err)!important}
+    .reader button.danger:not(.ghost){color:var(--q-onr)!important}
+    .reader .muted,.reader summary{color:var(--q-t2)}
+    .reader label{color:var(--q-tx)}
+    .reader details[open]>summary{color:var(--q-tx)}
+    .reader details,.reader pre,.reader input,.reader select,.reader textarea{background:var(--q-bg);color:var(--q-tx);border-color:var(--q-bd)}
+    .reader input:focus,.reader textarea:focus,.reader select:focus{border-color:var(--q-g)}
+    .reader :focus-visible{outline-color:var(--q-g)}
+    .empty p{color:var(--q-t2)}
+    .byline{color:var(--q-t2);border-bottom-color:var(--q-bd)}
+    .article{font-size:18px;line-height:1.7}
+    .article h2{color:var(--q-gt);border-top-color:var(--q-bd)}
+    .article h3{font-size:20px;font-weight:600}
+    .article h4{font-weight:400}
+    .article pre,.article code{background:var(--q-bg);color:var(--q-tx);border:1px solid var(--q-rs)}
+    .wiki-link{font-family:inherit;font-size:inherit;font-weight:inherit;line-height:inherit;letter-spacing:inherit;color:var(--q-g2t);background:none;border:0;border-radius:0;text-decoration:underline;text-decoration-color:rgba(var(--q-gr),0.4);text-underline-offset:3px;box-shadow:none}
+    .wiki-link:hover:not(:disabled){background:none;color:var(--q-tx);border:0;box-shadow:none}
+    .sources{border-top-color:var(--q-bd)}
+    .sources pre{color:var(--q-t2)}
+    .diff p{color:var(--q-t2)}
+    .diff pre{background:var(--q-bg);color:var(--q-tx);border-color:var(--q-bd)}
+
+    footer{border-top-color:var(--q-bd);color:var(--q-t3)}
+    .scroll-tools button{background:var(--q-sf);color:var(--q-gt);border:1px solid var(--q-g);border-radius:9999px;box-shadow:0 2px 8px rgba(var(--q-gr),0.2);font-family:var(--sans)}
+    .scroll-tools button:hover:not(:disabled){background:var(--q-rs);color:var(--q-g2t);box-shadow:0 0 20px rgba(var(--q-gr),0.4)}
+    dialog{background:var(--q-sf);color:var(--q-tx);border:1px solid rgba(var(--q-gr),0.251);border-top:2px solid var(--q-g);border-radius:6px;box-shadow:0 8px 32px rgba(var(--q-gr),.3)}
+    dialog p{font-size:16px}
+
+    .skin-card{font-family:var(--sans);font-size:14px;letter-spacing:0;color:var(--q-tx);background:var(--q-sf);border-color:var(--q-bd)}
+    .skin-card:hover:not(:disabled){background:var(--q-rs);color:var(--q-tx);border-color:rgba(var(--q-gr),0.251)}
+    .skin-card[aria-checked=true]{border-color:var(--q-g);box-shadow:0 0 20px rgba(var(--q-gr),0.4)}
+    .skin-card[aria-checked=true]:hover:not(:disabled){border-color:var(--q-g);box-shadow:0 0 20px rgba(var(--q-gr),0.4)}
+    .skin-name{color:var(--q-tx)}
+    .skin-on{color:var(--q-gt)}
+    .skin-desc{font-size:14px;color:var(--q-t2)}
+  `);
+  // ── 추가 스킨 엔진: CafeBlend / VoiceBox / Flip7 ─────────────────────
+  // 하나의 골격 CSS(SKELETON)가 --k-* 변수만 읽고, 스킨마다 변수 값(라이트/다크)과 소량의 추가 규칙만 다릅니다.
+  const chkUrl = c => `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3.2L13 4.5' fill='none' stroke='%23${c}' stroke-width='2.4' stroke-linecap='square'/%3E%3C/svg%3E")`;
+  const indUrl = c => `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8h9' fill='none' stroke='%23${c}' stroke-width='2.4' stroke-linecap='square'/%3E%3C/svg%3E")`;
+  const neu = (dk, lt, n) => `${n}px ${n}px ${n * 2}px ${dk},-${n}px -${n}px ${n * 2}px ${lt}`;
+  const neuIn = (dk, lt, n) => `inset ${n}px ${n}px ${n * 2}px ${dk},inset -${n}px -${n}px ${n * 2}px ${lt}`;
+  const varBlock = (selector, o) => `${selector}{${Object.entries(o).map(([k, v]) => `--${k}:${v}`).join(';')}}`;
+  const scopeBy = (prefix, css) => css.split('}').map(rule => {
+    const i = rule.indexOf('{'); if (i < 0) return '';
+    const selector = rule.slice(0, i).split(',').map(s => s.trim()).filter(Boolean)
+      .map(s => s.startsWith('&') ? prefix + s.slice(1) : `${prefix} ${s}`).join(',');
+    return `${selector}{${rule.slice(i + 1)}}`;
+  }).join('\n');
+
+  const SKELETON = `
+    &{font-size:15px}
+    body{background:var(--bg)}
+    *{scrollbar-color:var(--line2) transparent;scrollbar-width:thin}
+    ::selection{background:var(--k-mark);color:var(--tx)}
+
+    h1,h2,h3,h4,.brand h1,.head-lg,.stat b,.tool b,.skin-name{font-family:var(--head);letter-spacing:var(--k-hls)}
+    h1,h2,h3{font-weight:var(--k-hw)}
+    .head-lg,.art-head h2,.empty h2{font-size:var(--k-d);font-weight:var(--k-dw);line-height:var(--k-dlh);text-transform:var(--k-dup)}
+    .content>h2{font-size:var(--k-h2)}
+    .card h3{font-size:var(--k-h3);line-height:1.3}
+    .brand h1{color:var(--k-brand);font-weight:var(--k-dw);text-transform:var(--k-dup)}
+    .muted{color:var(--tx2);font-size:13px;line-height:1.6}
+    .label-md,.kicker{font-family:var(--k-lab-f);font-size:11px;font-weight:var(--k-lab-w);letter-spacing:var(--k-lab-ls);text-transform:var(--k-lab-up);color:var(--k-acct)}
+    label{font-size:14px;font-weight:400;color:var(--tx);text-transform:none;letter-spacing:0}
+    .card label,.editor label{font-size:var(--k-lfs);font-weight:var(--k-lfw);text-transform:var(--k-lup);letter-spacing:var(--k-lls)}
+    .card .row label,.editor label.row,.editor .row label{font-size:14px;font-weight:400;text-transform:none;letter-spacing:0}
+
+    button{font-family:var(--k-bf);font-size:var(--k-bfs);font-weight:var(--k-bfw);letter-spacing:var(--k-bls);text-transform:var(--k-bup);color:var(--k-sec-fg);background:var(--k-sec-bg);border:var(--k-btn-bw) solid var(--k-sec-bd);border-radius:var(--k-btn-r);box-shadow:var(--k-ctl);transition:background .2s,border-color .2s,color .2s,box-shadow .2s,transform .25s var(--k-ease)}
+    button:hover:not(:disabled){background:var(--k-sec-hbg);color:var(--k-sec-hfg);border-color:var(--k-sec-hbd);box-shadow:var(--k-ctl-h)}
+    button:active:not(:disabled){box-shadow:var(--k-ctl-a);transform:var(--k-act-t)}
+    button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--k-ring);outline-offset:2px}
+    button:disabled{opacity:.4;box-shadow:none}
+    .primary{background:var(--k-pri-bg);color:var(--k-pri-fg);border-color:var(--k-pri-bd);font-weight:var(--k-prifw);box-shadow:var(--k-pri-sh)}
+    .primary:hover:not(:disabled){background:var(--k-pri-hbg);color:var(--k-pri-hfg);border-color:var(--k-pri-hbd);box-shadow:var(--k-pri-hsh)}
+    .primary:active:not(:disabled){box-shadow:var(--k-pri-ash)}
+    .ghost{background:transparent;color:var(--k-gh-fg);border-color:transparent;box-shadow:none}
+    .ghost:hover:not(:disabled){background:var(--k-gh-hbg);color:var(--k-gh-hfg);border-color:transparent;box-shadow:none}
+    .ghost:active:not(:disabled){box-shadow:none}
+    button.danger:not(.ghost){background:var(--k-dn-bg);color:var(--k-dn-fg);border-color:var(--k-dn-bd)}
+    button.danger:not(.ghost):hover:not(:disabled){background:var(--k-dn-hbg);color:var(--k-dn-fg);border-color:var(--k-dn-hbg)}
+    .ghost.danger{color:var(--err)}
+    .pill{border-radius:var(--k-pill-r)}
+
+    .top{background:var(--k-top-bg);border-bottom:var(--k-top-b)}
+    .target{border-radius:var(--k-pill-r);border-color:var(--k-target-bd);color:var(--k-target-fg);background:var(--k-target-bg)}
+    .brand-icon{fill:var(--k-brand)}
+    .tabs{border-bottom:var(--k-tabs-b)}
+    .tab-list{padding:8px 10px;margin:-8px -10px}
+    .tab{font-family:var(--k-bf);color:var(--tx2);background:transparent;border-color:transparent;border-radius:var(--k-tab-r);box-shadow:none}
+    .tab .n{font-family:var(--mono);color:var(--tx3)}
+    .tab:hover:not(:disabled):not(.on){background:var(--hov);color:var(--tx);border-color:transparent;box-shadow:none}
+    .tab.on{background:var(--k-tabon-bg);color:var(--k-tabon-fg);border-color:var(--k-tabon-bd);box-shadow:var(--k-tabon-sh);font-weight:700}
+    .tab.on .n{color:var(--k-tabon-fg);opacity:.7}
+    .status{background:var(--bg2);border:1px solid var(--line);border-left:var(--k-status-l);border-radius:var(--k-card-r);color:var(--tx2);font-size:13px}
+    .preview-banner{border-radius:var(--k-card-r)}
+
+    .card{background:var(--bg2);border:var(--k-card-b);border-top:var(--k-card-bt);border-left:var(--k-card-bl);border-radius:var(--k-card-r);box-shadow:var(--k-card-sh);transition:border-color .2s,box-shadow .2s}
+    .card:hover{border-color:var(--k-card-hbd)}
+    .stat{background:var(--k-inset);border:1px solid var(--line);border-radius:var(--k-inp-r)}
+    .stat b{color:var(--k-acct)}
+    .tool{background:var(--bg2);color:var(--tx);border:var(--k-card-b);border-radius:var(--k-card-r);box-shadow:var(--k-card-sh)}
+    .tool:hover:not(:disabled){background:var(--hov);color:var(--tx);border-color:var(--k-sec-hbd);box-shadow:var(--k-ctl-h)}
+    .tool b{color:var(--tx)}
+    .tool span{font-family:var(--sans);letter-spacing:0;text-transform:none;font-weight:400;color:var(--tx2)}
+    summary{color:var(--tx2)}
+    details[open]>summary{color:var(--tx)}
+
+    input,select,textarea{font-family:var(--sans);font-size:14px;background:var(--k-inset);color:var(--tx);border:var(--k-inp-bw) solid var(--k-inp-bd);border-radius:var(--k-inp-r);box-shadow:var(--k-inp-sh);padding:9px 14px;transition:border-color .2s,box-shadow .2s,background .2s}
+    input::placeholder,textarea::placeholder{color:var(--tx3)}
+    input:hover:not(:disabled),select:hover:not(:disabled),textarea:hover:not(:disabled){background:var(--k-inph);border-color:var(--k-inp-hbd)}
+    input:focus,select:focus,textarea:focus{border-color:var(--k-inp-fbd);box-shadow:var(--k-inp-fsh);outline:none}
+    input:disabled,select:disabled,textarea:disabled{background:var(--k-inpd);box-shadow:none;opacity:.6}
+    .range input[type=number],.editor .body{font-family:var(--mono)}
+    input[type=checkbox]{-webkit-appearance:none;appearance:none;width:var(--k-cb);height:var(--k-cb);min-height:0;padding:0;flex-shrink:0;cursor:pointer;background-color:var(--k-cb-bg);background-repeat:no-repeat;background-position:center;background-size:72%;border:var(--k-cb-bw) solid var(--k-cb-bd);border-radius:var(--k-cb-r);box-shadow:var(--k-cb-sh)}
+    input[type=checkbox]:hover:not(:disabled){background-color:var(--k-cb-hbg);border-color:var(--k-cb-bd)}
+    input[type=checkbox]:checked,input[type=checkbox]:checked:hover:not(:disabled){background-color:var(--k-cb-on);border-color:var(--k-cb-onbd);background-image:var(--k-chk);box-shadow:var(--k-cb-onsh)}
+    input[type=checkbox]:indeterminate,input[type=checkbox]:indeterminate:hover:not(:disabled){background-color:var(--k-cb-on);border-color:var(--k-cb-onbd);background-image:var(--k-ind);box-shadow:var(--k-cb-onsh)}
+    input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
+
+    .sect,.chip{font-family:var(--k-bf);font-size:12px;font-weight:var(--k-chipfw);letter-spacing:var(--k-chip-ls);text-transform:var(--k-chip-up);border-radius:var(--k-chip-r)}
+    .sect{min-height:28px;padding:4px 14px;background:var(--k-chip-bg);color:var(--k-chip-fg);border:var(--k-chip-bw) solid var(--k-chip-bd);box-shadow:var(--k-chip-sh)}
+    .sect:hover:not(:disabled):not(.on){background:var(--hov);color:var(--tx);border-color:var(--k-chip-hbd);box-shadow:var(--k-chip-sh)}
+    .sect.on,.sect.on:hover:not(:disabled){background:var(--k-chip-on-bg);color:var(--k-chip-on-fg);border-color:var(--k-chip-on-bd);box-shadow:var(--k-chip-on-sh)}
+    .chip{font-size:11px;padding:2px 12px;border:var(--k-chip-bw) solid var(--k-chip-bd);color:var(--k-chip-fg)}
+    .chip.lock{background:var(--k-lockbg);color:var(--k-lockfg);border-color:var(--k-lockbg)}
+
+    .doc-list{gap:0;padding-right:0;background:var(--bg2);border:var(--k-list-b);border-radius:var(--k-list-r);box-shadow:var(--k-list-sh)}
+    .doc-list:empty{display:none}
+    .doc{font-family:var(--sans);font-size:15px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--tx);background:transparent;border:0;border-bottom:1px var(--k-divs) var(--k-divc);border-radius:0;padding:12px 16px;box-shadow:var(--k-docbar)}
+    .doc:last-child{border-bottom:0}
+    .doc:hover:not(:disabled){background:var(--hov);color:var(--tx);border-color:transparent transparent var(--k-divc);box-shadow:var(--k-docbar)}
+    .doc.active,.doc.active:hover:not(:disabled){background:var(--k-sel);border-color:transparent transparent var(--k-divc);box-shadow:var(--k-docbar-a)}
+    .doc small{font-family:var(--k-lab-f);font-size:11px;font-weight:var(--k-lab-w);letter-spacing:var(--k-lab-ls);text-transform:var(--k-lab-up);color:var(--k-acct)}
+    .doc .t{font-size:15px;font-weight:var(--k-docfw)}
+    .reference-item{border-top-color:var(--k-divc)}
+
+    .reader{position:relative;background:var(--paper);color:var(--tx);border:var(--k-reader-b);border-top:var(--k-reader-bt);border-radius:var(--k-reader-r);box-shadow:var(--k-rd-sh)}
+    .reader button:not(.primary):not(.wiki-link){color:var(--k-sec-fg);border-color:var(--k-sec-bd);background:var(--k-sec-bg)}
+    .reader button:hover:not(:disabled):not(.primary):not(.wiki-link){background:var(--k-sec-hbg);border-color:var(--k-sec-hbd);color:var(--k-sec-hfg)}
+    .reader button.ghost:not(.primary):not(.wiki-link){color:var(--k-gh-fg);border-color:transparent;background:transparent}
+    .reader button.ghost:hover:not(:disabled):not(.primary):not(.wiki-link){background:var(--k-gh-hbg);color:var(--k-gh-hfg);border-color:transparent}
+    .reader button.danger:not(.ghost):not(.primary):not(.wiki-link){background:var(--k-dn-bg);color:var(--k-dn-fg);border-color:var(--k-dn-bd)}
+    .reader button.danger:not(.ghost):hover:not(:disabled):not(.primary):not(.wiki-link){background:var(--k-dn-hbg);color:var(--k-dn-fg);border-color:var(--k-dn-hbg)}
+    .reader .danger{color:var(--err)!important}
+    .reader button.danger:not(.ghost){color:var(--k-dn-fg)!important}
+    .reader .muted,.reader summary{color:var(--tx2)}
+    .reader label{color:var(--tx)}
+    .reader details[open]>summary{color:var(--tx)}
+    .reader details,.reader pre,.reader input,.reader select,.reader textarea{background:var(--k-inset);color:var(--tx);border-color:var(--k-inp-bd)}
+    .reader input:focus,.reader textarea:focus,.reader select:focus{border-color:var(--k-inp-fbd)}
+    .reader :focus-visible{outline-color:var(--k-ring)}
+    .empty p{color:var(--tx2)}
+    .byline{color:var(--tx2);border-bottom:1px solid var(--line)}
+    .article{font-size:var(--k-afs);line-height:var(--k-alh)}
+    .article h2{font-size:var(--k-a2);color:var(--k-ah2);border-top:var(--k-ah2b)}
+    .article h3{font-size:var(--k-a3);font-weight:var(--k-hw)}
+    .article h4{font-weight:var(--k-hw)}
+    .article pre,.article code{background:var(--k-code);color:var(--tx);border:1px solid var(--line)}
+    .wiki-link{font-family:inherit;font-size:inherit;font-weight:inherit;line-height:inherit;letter-spacing:inherit;text-transform:none;color:var(--k-link);background:none;border:0;border-radius:0;text-decoration:underline;text-underline-offset:3px;box-shadow:none}
+    .wiki-link:hover:not(:disabled){background:none;color:var(--k-linkh);border:0;box-shadow:none}
+    .sources{border-top:1px solid var(--line)}
+    .sources pre{color:var(--tx2)}
+    .diff p{color:var(--tx2)}
+    .diff pre{background:var(--k-inset);color:var(--tx);border:1px solid var(--line)}
+
+    footer{border-top:1px solid var(--line);color:var(--tx3)}
+    .scroll-tools button{background:var(--bg2);color:var(--k-acct);border:var(--k-btn-bw) solid var(--k-sec-bd);border-radius:var(--k-scroll-r);box-shadow:var(--k-ctl);font-family:var(--sans);text-transform:none}
+    dialog{background:var(--bg2);color:var(--tx);border:var(--k-dlg-b);border-radius:var(--k-dlg-r);box-shadow:var(--k-dlg-sh)}
+    dialog p{font-size:15px}
+
+    .skin-card{font-family:var(--sans);font-size:14px;font-weight:400;letter-spacing:0;text-transform:none;color:var(--tx);background:var(--bg2);border:1px solid var(--line);border-radius:var(--k-card-r);box-shadow:var(--k-card-sh)}
+    .skin-card:hover:not(:disabled){background:var(--hov);color:var(--tx);border-color:var(--k-acct);box-shadow:var(--k-card-sh)}
+    .skin-card[aria-checked=true],.skin-card[aria-checked=true]:hover:not(:disabled){border-color:var(--k-acct);box-shadow:var(--k-sel-sh)}
+    .skin-name{color:var(--tx)}
+    .skin-on{color:var(--k-acct)}
+    .skin-desc{color:var(--tx2)}
   `;
+
+  // 스킨별 모양(라이트/다크 공통) 변수
+  const SHAPES = {
+    cafeblend: {
+      r: '12px', head: '"DM Serif Display","Noto Serif KR","Batang",serif', sans: '"Work Sans","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif', mono: '"IBM Plex Mono",ui-monospace,Consolas,monospace',
+      'k-bf': 'var(--sans)', 'k-bfs': '14px', 'k-bfw': '500', 'k-bls': '0', 'k-bup': 'none', 'k-btn-r': '12px', 'k-btn-bw': '0px', 'k-act-t': 'none', 'k-ease': 'ease', 'k-prifw': '600', 'k-pill-r': '9999px',
+      'k-hls': '0', 'k-hw': '400', 'k-dw': '400', 'k-dlh': '1.25', 'k-dup': 'none', 'k-d': '34px', 'k-h2': '26px', 'k-h3': '20px', 'k-a2': '26px', 'k-a3': '20px', 'k-afs': '16px', 'k-alh': '1.8',
+      'k-lab-f': 'var(--sans)', 'k-lab-w': '600', 'k-lab-ls': '.08em', 'k-lab-up': 'uppercase', 'k-lfs': '14px', 'k-lfw': '500', 'k-lup': 'none', 'k-lls': '0',
+      'k-card-r': '12px', 'k-card-b': '0 solid transparent', 'k-card-bt': '0 solid transparent', 'k-card-bl': '0 solid transparent', 'k-card-hbd': 'transparent',
+      'k-inp-r': '12px', 'k-inp-bw': '1px', 'k-chip-r': '9999px', 'k-chip-bw': '0px', 'k-chip-ls': '0', 'k-chip-up': 'none', 'k-chipfw': '500', 'k-tab-r': '9999px',
+      'k-reader-r': '12px', 'k-reader-b': '0 solid transparent', 'k-reader-bt': '0 solid transparent', 'k-list-r': '12px', 'k-list-b': '0 solid transparent', 'k-divs': 'solid', 'k-docfw': '500',
+      'k-dlg-r': '16px', 'k-dlg-b': '0 solid transparent', 'k-cb': '18px', 'k-cb-r': '6px', 'k-cb-bw': '2px', 'k-scroll-r': '9999px',
+    },
+    voicebox: {
+      r: '0px', head: '"Archivo Black","Black Han Sans",Impact,"Arial Black",sans-serif', sans: '"Work Sans","Noto Sans KR",-apple-system,"Segoe UI",Helvetica,sans-serif', mono: '"Space Mono","Courier New",Consolas,monospace',
+      'k-bf': 'var(--sans)', 'k-bfs': '13px', 'k-bfw': '700', 'k-bls': '.06em', 'k-bup': 'uppercase', 'k-btn-r': '0px', 'k-btn-bw': '2px', 'k-act-t': 'none', 'k-ease': 'ease', 'k-prifw': '700', 'k-pill-r': '0px',
+      'k-hls': '-.02em', 'k-hw': '400', 'k-dw': '400', 'k-dlh': '1.1', 'k-dup': 'none', 'k-d': '44px', 'k-h2': '28px', 'k-h3': '20px', 'k-a2': '26px', 'k-a3': '20px', 'k-afs': '16px', 'k-alh': '1.75',
+      'k-lab-f': 'var(--sans)', 'k-lab-w': '700', 'k-lab-ls': '.12em', 'k-lab-up': 'uppercase', 'k-lfs': '12px', 'k-lfw': '700', 'k-lup': 'uppercase', 'k-lls': '.06em',
+      'k-card-r': '0px', 'k-card-b': '2px solid var(--line)', 'k-card-bt': '2px solid var(--line)', 'k-card-bl': '2px solid var(--line)', 'k-card-hbd': 'var(--tx)',
+      'k-inp-r': '0px', 'k-inp-bw': '2px', 'k-chip-r': '0px', 'k-chip-bw': '2px', 'k-chip-ls': '.04em', 'k-chip-up': 'uppercase', 'k-chipfw': '700', 'k-tab-r': '0px',
+      'k-reader-r': '0px', 'k-reader-b': '2px solid var(--line)', 'k-reader-bt': '4px solid #EF4444', 'k-list-r': '0px', 'k-list-b': '2px solid var(--line)', 'k-divs': 'solid', 'k-docfw': '400',
+      'k-dlg-r': '0px', 'k-dlg-b': '2px solid var(--tx)', 'k-cb': '18px', 'k-cb-r': '0px', 'k-cb-bw': '2px', 'k-scroll-r': '0px',
+    },
+    flip7: {
+      r: '12px', head: '-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif', sans: '-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif', mono: 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace',
+      'k-bf': 'var(--sans)', 'k-bfs': '14px', 'k-bfw': '700', 'k-bls': '.03em', 'k-bup': 'none', 'k-btn-r': '999px', 'k-btn-bw': '2px', 'k-act-t': 'scale(.95)', 'k-ease': 'cubic-bezier(.34,1.56,.64,1)', 'k-prifw': '800', 'k-pill-r': '999px',
+      'k-hls': '.04em', 'k-hw': '800', 'k-dw': '800', 'k-dlh': '1.15', 'k-dup': 'none', 'k-d': '34px', 'k-h2': '24px', 'k-h3': '17px', 'k-a2': '20px', 'k-a3': '17px', 'k-afs': '15px', 'k-alh': '1.8',
+      'k-lab-f': 'var(--sans)', 'k-lab-w': '800', 'k-lab-ls': '.1em', 'k-lab-up': 'uppercase', 'k-lfs': '13px', 'k-lfw': '700', 'k-lup': 'none', 'k-lls': '.02em',
+      'k-card-r': '14px', 'k-card-b': '2px solid transparent', 'k-card-bt': '2px solid transparent', 'k-card-bl': '6px solid #3CC4BD', 'k-card-hbd': 'transparent',
+      'k-inp-r': '8px', 'k-inp-bw': '2px', 'k-chip-r': '999px', 'k-chip-bw': '2px', 'k-chip-ls': '.02em', 'k-chip-up': 'none', 'k-chipfw': '700', 'k-tab-r': '999px',
+      'k-reader-r': '16px', 'k-reader-b': '2px solid var(--line)', 'k-reader-bt': '6px solid #2BA8A2', 'k-list-r': '14px', 'k-list-b': '2px solid var(--line)', 'k-divs': 'dashed', 'k-docfw': '700',
+      'k-dlg-r': '16px', 'k-dlg-b': '2px solid var(--line2)', 'k-cb': '20px', 'k-cb-r': '6px', 'k-cb-bw': '2px', 'k-scroll-r': '9999px',
+    },
+  };
+
+  // 팔레트 → 변수. 각 빌더는 팔레트 p로 색 관련 변수를 모두 만듭니다.
+  const buildCafe = p => {
+    const raised = neu(p.dk, p.lt, 6); // 카드에만 뉴모피즘 raised를 유지합니다(버튼·입력창은 평면)
+    return {
+      'color-scheme': p.scheme, bg: p.bg, bg2: p.card, panel: p.card, line: p.line, line2: p.line2, tx: p.tx, tx2: p.tx2, tx3: p.tx3, paper: p.card, ink: p.tx,
+      warn: p.warn, err: p.err, pbg: p.acc, pfg: p.accfg, phov: p.acch, hov: p.hov, hov2: p.hov2, bgA: `rgba(${p.bgrgb},.94)`, wbd: p.wbd, wbg: p.wbg, dbd: p.dbd, dbg: p.dbg, shadow: raised, back: p.back,
+      'k-inset': p.inset, 'k-inph': p.inph, 'k-inpd': p.inpd, 'k-acct': p.acct, 'k-link': p.acct, 'k-linkh': p.acch, 'k-code': p.inset, 'k-lockbg': p.lockbg, 'k-lockfg': p.lockfg,
+      'k-ring': p.acct, 'k-mark': p.mark, 'k-brand': p.acct,
+      'k-sec-bg': p.soft, 'k-sec-fg': p.softfg, 'k-sec-bd': 'transparent', 'k-sec-hbg': p.soft, 'k-sec-hfg': p.softh, 'k-sec-hbd': 'transparent',
+      'k-pri-bg': p.acc, 'k-pri-fg': p.accfg, 'k-pri-bd': 'transparent', 'k-pri-hbg': p.acch, 'k-pri-hfg': p.accfg, 'k-pri-hbd': 'transparent',
+      'k-gh-fg': p.ghfg, 'k-gh-hbg': p.soft, 'k-gh-hfg': p.ghhfg,
+      'k-dn-bg': p.dn, 'k-dn-fg': '#FFFFFF', 'k-dn-bd': 'transparent', 'k-dn-hbg': p.dnh,
+      'k-ctl': 'none', 'k-ctl-h': 'none', 'k-ctl-a': 'none', 'k-pri-sh': 'none', 'k-pri-hsh': 'none', 'k-pri-ash': 'none',
+      'k-card-sh': raised, 'k-inp-sh': 'none', 'k-inp-fsh': `0 0 0 3px rgba(${p.ring},.25)`, 'k-inp-bd': p.line2, 'k-inp-hbd': p.tx3, 'k-inp-fbd': p.acc,
+      'k-rd-sh': `0 4px 12px rgba(0,0,0,${p.dkMode ? .35 : .08})`, 'k-dlg-sh': `0 8px 24px rgba(0,0,0,${p.dkMode ? .5 : .12})`, 'k-list-sh': `0 2px 4px rgba(0,0,0,${p.dkMode ? .3 : .06})`,
+      'k-sel-sh': `0 0 0 3px rgba(${p.ring},.35),${raised}`,
+      'k-tabon-bg': p.acc, 'k-tabon-fg': p.accfg, 'k-tabon-bd': 'transparent', 'k-tabon-sh': 'none',
+      'k-chip-bg': p.soft, 'k-chip-fg': p.softfg, 'k-chip-bd': 'transparent', 'k-chip-hbd': 'transparent', 'k-chip-sh': 'none',
+      'k-chip-on-bg': p.acc, 'k-chip-on-fg': p.accfg, 'k-chip-on-bd': 'transparent', 'k-chip-on-sh': 'none',
+      'k-divc': p.line, 'k-sel': p.hov2, 'k-docbar': 'inset 0 0 0 0 transparent', 'k-docbar-a': `inset 3px 0 0 ${p.acc}`,
+      'k-cb-bg': p.inset, 'k-cb-hbg': p.inph, 'k-cb-bd': p.line2, 'k-cb-sh': 'none', 'k-cb-on': p.acc, 'k-cb-onbd': p.acc, 'k-cb-onsh': 'none',
+      'k-chk': chkUrl(p.chk), 'k-ind': indUrl(p.chk),
+      'k-ah2': p.acct, 'k-ah2b': `1px solid ${p.line}`,
+      'k-top-bg': p.bg, 'k-top-b': `1px solid ${p.line}`, 'k-tabs-b': `1px solid ${p.line}`, 'k-target-bg': p.card, 'k-target-fg': p.tx2, 'k-target-bd': p.line, 'k-status-l': `3px solid ${p.acc}`,
+    };
+  };
+  const buildVoice = p => ({
+    'color-scheme': p.scheme, bg: p.bg, bg2: p.card, panel: p.card, line: p.line, line2: p.line2, tx: p.tx, tx2: p.tx2, tx3: p.tx3, paper: p.card, ink: p.tx,
+    warn: p.warn, err: p.err, pbg: p.tx, pfg: p.inv, phov: '#EF4444', hov: p.hov, hov2: p.hov2, bgA: `rgba(${p.bgrgb},.95)`, wbd: p.wbd, wbg: p.wbg, dbd: p.dbd, dbg: p.dbg, shadow: 'none', back: p.back,
+    'k-inset': p.inset, 'k-inph': p.inph, 'k-inpd': p.inpd, 'k-acct': p.tx, 'k-link': p.tx, 'k-linkh': '#EF4444', 'k-code': p.code, 'k-lockbg': p.tx, 'k-lockfg': p.inv,
+    'k-ring': p.tx, 'k-mark': 'rgba(239,68,68,.3)', 'k-brand': p.tx,
+    'k-sec-bg': 'transparent', 'k-sec-fg': p.tx, 'k-sec-bd': p.tx, 'k-sec-hbg': p.tx, 'k-sec-hfg': p.inv, 'k-sec-hbd': p.tx,
+    'k-pri-bg': p.tx, 'k-pri-fg': p.inv, 'k-pri-bd': p.tx, 'k-pri-hbg': '#EF4444', 'k-pri-hfg': '#FAFAFA', 'k-pri-hbd': '#EF4444',
+    'k-gh-fg': p.tx, 'k-gh-hbg': 'transparent', 'k-gh-hfg': '#EF4444',
+    'k-dn-bg': '#DC2626', 'k-dn-fg': '#FAFAFA', 'k-dn-bd': '#DC2626', 'k-dn-hbg': '#B91C1C',
+    'k-ctl': 'none', 'k-ctl-h': 'none', 'k-ctl-a': 'none', 'k-pri-sh': 'none', 'k-pri-hsh': 'none', 'k-pri-ash': 'none',
+    'k-card-sh': 'none', 'k-inp-sh': 'none', 'k-inp-fsh': `0 0 0 2px ${p.bg},0 0 0 4px ${p.tx}`, 'k-inp-bd': p.line2, 'k-inp-hbd': p.tx2, 'k-inp-fbd': p.tx,
+    'k-rd-sh': 'none', 'k-dlg-sh': 'none', 'k-list-sh': 'none', 'k-sel-sh': `0 0 0 2px ${p.bg},0 0 0 4px ${p.tx}`,
+    'k-tabon-bg': 'transparent', 'k-tabon-fg': p.tx, 'k-tabon-bd': 'transparent', 'k-tabon-sh': 'none',
+    'k-chip-bg': 'transparent', 'k-chip-fg': p.tx2, 'k-chip-bd': p.line2, 'k-chip-hbd': p.tx, 'k-chip-sh': 'none',
+    'k-chip-on-bg': p.tx, 'k-chip-on-fg': p.inv, 'k-chip-on-bd': p.tx, 'k-chip-on-sh': 'none',
+    'k-divc': p.line, 'k-sel': p.hov2, 'k-docbar': 'inset 0 0 0 0 transparent', 'k-docbar-a': `inset 4px 0 0 ${p.tx}`,
+    'k-cb-bg': p.bg, 'k-cb-hbg': p.hov, 'k-cb-bd': p.tx, 'k-cb-sh': 'none', 'k-cb-on': p.tx, 'k-cb-onbd': p.tx, 'k-cb-onsh': 'none',
+    'k-chk': chkUrl(p.chkc), 'k-ind': indUrl(p.chkc),
+    'k-ah2': p.tx, 'k-ah2b': `2px solid ${p.tx}`,
+    'k-top-bg': p.bg, 'k-top-b': `4px solid ${p.tx}`, 'k-tabs-b': `2px solid ${p.tx}`, 'k-target-bg': 'transparent', 'k-target-fg': p.tx2, 'k-target-bd': p.line2, 'k-status-l': `4px solid ${p.tx}`,
+  });
+  const buildFlip = p => ({
+    'color-scheme': p.scheme, bg: p.bg, bg2: p.card, panel: p.card, line: p.line, line2: p.line2, tx: p.tx, tx2: p.tx2, tx3: p.tx3, paper: p.card, ink: p.tx,
+    warn: p.warn, err: p.err, pbg: '#FFD23F', pfg: '#2C3E50', phov: '#E6B800', hov: p.hov, hov2: p.hov2, bgA: `rgba(${p.bgrgb},.94)`, wbd: p.wbd, wbg: p.wbg, dbd: p.dbd, dbg: p.dbg, shadow: p.cardsh, back: p.back,
+    'k-inset': p.inset, 'k-inph': p.inph, 'k-inpd': p.inpd, 'k-acct': p.acct, 'k-link': p.acct, 'k-linkh': p.linkh, 'k-code': p.inset, 'k-lockbg': '#FFE47A', 'k-lockfg': '#2C3E50',
+    'k-ring': '#5DADE2', 'k-mark': 'rgba(255,210,63,.45)', 'k-brand': '#FFFFFF',
+    'k-sec-bg': p.secbg, 'k-sec-fg': p.secfg, 'k-sec-bd': '#2BA8A2', 'k-sec-hbg': p.sechbg, 'k-sec-hfg': p.sechfg, 'k-sec-hbd': '#2BA8A2',
+    'k-pri-bg': 'linear-gradient(rgba(255,255,255,.42),rgba(255,255,255,0) 55%),linear-gradient(135deg,#FFD23F,#E6B800)', 'k-pri-fg': '#2C3E50', 'k-pri-bd': 'transparent',
+    'k-pri-hbg': 'linear-gradient(rgba(255,255,255,.42),rgba(255,255,255,0) 55%),linear-gradient(135deg,#FFE47A,#FFD23F)', 'k-pri-hfg': '#2C3E50', 'k-pri-hbd': 'transparent',
+    'k-gh-fg': p.tx2, 'k-gh-hbg': p.hov, 'k-gh-hfg': p.acct,
+    'k-dn-bg': '#C2432A', 'k-dn-fg': '#FFFFFF', 'k-dn-bd': 'transparent', 'k-dn-hbg': '#A83822',
+    'k-ctl': 'none', 'k-ctl-h': 'none', 'k-ctl-a': 'none',
+    'k-pri-sh': 'none', 'k-pri-hsh': 'none', 'k-pri-ash': 'none',
+    'k-card-sh': p.cardsh, 'k-inp-sh': 'none', 'k-inp-fsh': '0 0 0 3px rgba(93,173,226,.28)', 'k-inp-bd': p.inpbd, 'k-inp-hbd': '#3CC4BD', 'k-inp-fbd': '#5DADE2',
+    'k-rd-sh': p.cardsh, 'k-dlg-sh': `0 8px 32px rgba(0,0,0,${p.dkMode ? .5 : .16})`, 'k-list-sh': p.cardsh, 'k-sel-sh': '0 0 0 3px rgba(255,210,63,.6),0 4px 20px rgba(255,210,63,.4)',
+    'k-tabon-bg': 'linear-gradient(135deg,#FFD23F,#E6B800)', 'k-tabon-fg': '#2C3E50', 'k-tabon-bd': 'transparent', 'k-tabon-sh': 'none',
+    'k-chip-bg': p.chipbg, 'k-chip-fg': p.chipfg, 'k-chip-bd': p.chipbd, 'k-chip-hbd': '#2BA8A2', 'k-chip-sh': 'none',
+    'k-chip-on-bg': p.chipon, 'k-chip-on-fg': p.onteal, 'k-chip-on-bd': p.chipon, 'k-chip-on-sh': 'none',
+    'k-divc': p.divc, 'k-sel': p.sel, 'k-docbar': 'inset 6px 0 0 #3CC4BD', 'k-docbar-a': 'inset 6px 0 0 #FFD23F',
+    'k-cb-bg': p.inset, 'k-cb-hbg': p.inph, 'k-cb-bd': p.cbbd, 'k-cb-sh': 'none', 'k-cb-on': '#2BA8A2', 'k-cb-onbd': '#2BA8A2', 'k-cb-onsh': 'none',
+    'k-chk': chkUrl(p.onchk), 'k-ind': indUrl(p.onchk),
+    'k-ah2': p.acct, 'k-ah2b': `2px dashed ${p.acct}`,
+    'k-top-bg': p.topbg, 'k-top-b': '3px solid #FFD23F', 'k-tabs-b': `2px dashed ${p.divc}`, 'k-target-bg': 'rgba(0,0,0,.22)', 'k-target-fg': '#FFFFFF', 'k-target-bd': 'rgba(255,255,255,.4)', 'k-status-l': '6px solid #2BA8A2',
+    'k-cream': p.cream, 'k-cream2': p.cream2, 'k-ribbon-bd': p.ribbonbd, 'k-ribbon-fg': p.ribbonfg,
+  });
+
+  const PALETTES = {
+    cafeblend: {
+      build: buildCafe,
+      light: {scheme: 'light', bg: '#FDF6EC', card: '#FFFFFF', line: '#E8DDD0', line2: '#D9CBB8', tx: '#3E2723', tx2: '#6D4C41', tx3: '#7F6055', warn: '#B45309', err: '#DC2626',
+        acc: '#8B5E3C', accfg: '#FFFFFF', acch: '#6B4226', acct: '#8B5E3C', soft: '#FAF0E1', softfg: '#8B5E3C', softh: '#6B4226', inset: '#F0E6D6', inph: '#EBE0D0', inpd: '#F5EDE3',
+        hov: '#FAF0E1', hov2: '#F0E6D6', dk: '#D5C9B8', lt: '#FFFFFF', wbd: '#F3C98B', wbg: '#FEF3C7', dbd: '#FCA5A5', dbg: '#FEE2E2', back: 'rgba(62,39,35,.5)', lockbg: '#EDE9FE', lockfg: '#4F46E5',
+        ring: '139,94,60', chk: 'FFFFFF', dn: '#DC2626', dnh: '#B91C1C', pressdk: 'rgba(0,0,0,.35)', ghfg: '#6D4C41', ghhfg: '#3E2723', bgrgb: '253,246,236', mark: 'rgba(196,149,106,.4)', dkMode: false},
+      dark: {scheme: 'dark', bg: '#1E1612', card: '#2B1F19', line: '#3C2C23', line2: '#4A372C', tx: '#F3E6D6', tx2: '#C9B29B', tx3: '#A58F7B', warn: '#F59E0B', err: '#F87171',
+        acc: '#C4956A', accfg: '#1E1612', acch: '#D3A57B', acct: '#D9A878', soft: '#34261E', softfg: '#D9A878', softh: '#F0C9A0', inset: '#241A15', inph: '#2A1E18', inpd: '#1A120F',
+        hov: '#34261E', hov2: '#3C2C23', dk: '#120C09', lt: '#35271F', wbd: '#8A5A18', wbg: '#2D2110', dbd: '#7F1D1D', dbg: '#3A1717', back: 'rgba(10,6,4,.7)', lockbg: '#3B3270', lockfg: '#DDD6FE',
+        ring: '196,149,106', chk: '1E1612', dn: '#DC2626', dnh: '#B91C1C', pressdk: 'rgba(0,0,0,.5)', ghfg: '#C9B29B', ghhfg: '#F3E6D6', bgrgb: '30,22,18', mark: 'rgba(196,149,106,.35)', dkMode: true},
+    },
+    voicebox: {
+      build: buildVoice,
+      light: {scheme: 'light', bg: '#FAFAFA', card: '#FAFAFA', line: '#E5E5E5', line2: '#D4D4D4', tx: '#0A0A0A', tx2: '#525252', tx3: '#737373', inv: '#FAFAFA', chkc: 'FAFAFA',
+        hov: '#F5F5F5', hov2: '#E5E5E5', inset: '#FAFAFA', inph: '#F5F5F5', inpd: '#F5F5F5', code: '#F5F5F5', warn: '#A16207', err: '#DC2626', wbd: '#CA8A04', wbg: '#FEFCE8', dbd: '#EF4444', dbg: '#FEF2F2', back: 'rgba(10,10,10,.6)', bgrgb: '250,250,250'},
+      dark: {scheme: 'dark', bg: '#0A0A0A', card: '#0F0F0F', line: '#262626', line2: '#404040', tx: '#FAFAFA', tx2: '#A3A3A3', tx3: '#8A8A8A', inv: '#0A0A0A', chkc: '0A0A0A',
+        hov: '#171717', hov2: '#262626', inset: '#0A0A0A', inph: '#141414', inpd: '#141414', code: '#171717', warn: '#FACC15', err: '#F87171', wbd: '#CA8A04', wbg: '#1A1604', dbd: '#7F1D1D', dbg: '#2A1010', back: 'rgba(0,0,0,.75)', bgrgb: '10,10,10'},
+    },
+    flip7: {
+      build: buildFlip,
+      light: {scheme: 'light', bg: '#EFF8F7', card: '#FFFFFF', line: '#CDE7E4', line2: '#B5DAD6', tx: '#2C3E50', tx2: '#4A6572', tx3: '#557279', warn: '#B8442A', err: '#D0392B',
+        hov: '#E8F6F5', hov2: '#D4EFEC', inset: '#FFF8E7', inph: '#FFF3D6', inpd: '#F3EEDF', acct: '#17706B', linkh: '#D45233', secbg: '#FFFFFF', secfg: '#17706B', sechbg: '#E8F6F5', sechfg: '#17706B',
+        inpbd: '#E0E0E0', chipbg: '#FFF8E7', chipfg: '#17706B', chipbd: '#F0E3BF', onteal: '#FFFFFF', chipon: '#17706B', cbbd: '#1E8C86', onchk: 'FFFFFF', divc: '#BFE3E0', sel: '#FFF8E7',
+        wbd: '#E6B800', wbg: '#FFF8E7', dbd: '#EF6C4A', dbg: '#FDEBE5', back: 'rgba(30,60,58,.55)', bgrgb: '239,248,247', cardsh: '0 4px 20px rgba(43,168,162,.10)', dkMode: false,
+        topbg: 'linear-gradient(135deg,#23958F,#1B7F7A)', cream: '#FFF8E7', cream2: '#EBDDB8', ribbonbd: '#2C3E50', ribbonfg: '#17706B'},
+      dark: {scheme: 'dark', bg: '#0E2624', card: '#16322F', line: '#24504B', line2: '#2E625C', tx: '#E8F6F5', tx2: '#A9CFCB', tx3: '#86B0AB', warn: '#FFD23F', err: '#FF8A6A',
+        hov: '#1D403C', hov2: '#24504B', inset: '#112B28', inph: '#163532', inpd: '#0E2624', acct: '#5FD6CF', linkh: '#FFD23F', secbg: '#16322F', secfg: '#5FD6CF', sechbg: '#1D403C', sechfg: '#8DE6E0',
+        inpbd: '#2E625C', chipbg: '#1D403C', chipfg: '#8DE6E0', chipbd: '#2E625C', onteal: '#06201E', chipon: '#2BA8A2', cbbd: '#3CC4BD', onchk: 'FFFFFF', divc: '#2E625C', sel: '#1D403C',
+        wbd: '#E6B800', wbg: '#2B2A14', dbd: '#D45233', dbg: '#3A1E16', back: 'rgba(2,12,11,.72)', bgrgb: '14,38,36', cardsh: '0 4px 20px rgba(0,0,0,.35)', dkMode: true,
+        topbg: 'linear-gradient(135deg,#1B7F7A,#0F4F4B)', cream: '#1D403C', cream2: '#14302D', ribbonbd: '#5FD6CF', ribbonfg: '#8DE6E0'},
+    },
+  };
+
+  // 스킨별 추가 규칙(골격으로 표현하기 어려운 고유 요소)
+  const SKIN_EXTRA = {
+    cafeblend: `
+      .brand h1{font-size:30px}
+      .tab.on{font-weight:600}
+      .tool{background:var(--k-sec-bg);box-shadow:none}
+      .tool:hover:not(:disabled){background:var(--hov2);box-shadow:none}
+      .scroll-tools button{background:var(--k-sec-bg);box-shadow:none}
+    `,
+    voicebox: `
+      .brand h1{font-size:30px;text-transform:uppercase;letter-spacing:-.03em}
+      .tab{border-radius:0;border-width:0 0 3px 0;border-style:solid;border-color:transparent;padding:0 14px}
+      .tab.on{border-bottom:3px solid #EF4444}
+      .tab-list{gap:8px}
+      .article h2{padding-top:12px}
+      .byline{border-bottom:2px solid var(--tx)}
+      .status{font-weight:500}
+      .reader .art-head h2{letter-spacing:-.03em}
+    `,
+    flip7: `
+      .top button{color:#FFFFFF;border-color:rgba(255,255,255,.55);background:rgba(255,255,255,.14);box-shadow:none}
+      .top button:hover:not(:disabled){background:rgba(255,255,255,.28);color:#FFFFFF;border-color:#FFFFFF}
+      .brand h1{font-size:30px;letter-spacing:.06em;transform:rotate(-2deg);text-shadow:0 2px 0 rgba(0,0,0,.22)}
+      .brand-icon{width:32px;height:32px}
+      .primary{letter-spacing:.08em;min-height:44px}
+      .tool{background:var(--k-inset);border:2px solid var(--line);box-shadow:none}
+      .tool:hover:not(:disabled){background:var(--k-inph);border-color:#2BA8A2;box-shadow:none}
+      .card h3{color:var(--k-acct);padding-bottom:8px;border-bottom:2px dashed var(--k-acct)}
+      .stat{background:var(--k-inset)}
+      .reader{isolation:isolate}
+      .kicker{display:inline-block;position:relative;margin-left:12px;padding:3px 14px;background:var(--k-cream);color:var(--k-ribbon-fg);border:2px solid var(--k-ribbon-bd);border-radius:4px;letter-spacing:.14em}
+      .kicker::before,.kicker::after{content:"";position:absolute;top:6px;width:14px;height:100%;background:var(--k-cream2);border:2px solid var(--k-ribbon-bd);z-index:-1}
+      .kicker::before{left:-12px;border-right:0}
+      .kicker::after{right:-12px;border-left:0}
+      .article h2{border-top:0;padding-top:0;padding-bottom:6px;border-bottom:var(--k-ah2b)}
+      .preview-banner{animation:flip7pulse 2s ease-in-out infinite}
+    `,
+  };
+
+  const SKINS_CSS = Object.entries(PALETTES).map(([id, def]) => {
+    const P = `:root[data-skin=${id}]`;
+    return [
+      varBlock(P, {...SHAPES[id], ...def.build(def.light)}),
+      varBlock(`${P}[data-theme=dark]`, {...SHAPES[id], ...def.build(def.dark)}),
+      scopeBy(P, SKELETON),
+      scopeBy(P, SKIN_EXTRA[id] || ''),
+      `@media(max-width:760px){${P} .head-lg,${P} .art-head h2,${P} .empty h2{font-size:calc(var(--k-d) * .72)}}`,
+    ].join('\n');
+  }).join('\n');
   const extraStyle = document.createElement('style');
-  extraStyle.textContent = SHARED_CSS + DESIGN_CSS;
+  extraStyle.textContent = SHARED_CSS + QUEST_CSS + SKINS_CSS;
   const fonts = document.createElement('link');
   fonts.rel = 'stylesheet';
-  fonts.href = 'https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Work+Sans:wght@400;500;600;700;800&family=Archivo+Black&family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap';
+  fonts.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap';
   document.head.appendChild(fonts); // 오프라인·차단 환경에서는 CSS의 대체 sans-serif 폰트로 표시됩니다.
   document.head.appendChild(style);
   document.head.appendChild(extraStyle);
@@ -708,7 +1189,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
         <button id="import-json" class="tool"${disabled(frozen || !ui.saved)}><div><b>백업 가져오기</b><span>공통 문서함 전체를 교체할 초안으로 불러옵니다. v2 백업을 지원합니다.</span></div></button>
         <button id="undo" class="tool"${disabled(frozen || !ui.saved?.history.length)}><div><b>이전 저장으로 복원</b><span>모든 폴더와 문서·채팅 처리 이력을 직전 저장 상태로 되돌립니다.</span></div></button></div>`;
     document.body.innerHTML = `<div class="shell">
-      <header class="top"><div class="brand"><svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill-rule="evenodd" d="${ui.skin === 'default' ? 'M12 2 23 22H1Z' : 'M3 3h7a4 4 0 0 1 2 1 4 4 0 0 1 2-1h7v17h-7a4 4 0 0 0-2 1 4 4 0 0 0-2-1H3Zm2 2v13h5l1 .2V6a2 2 0 0 0-1-1Zm8 1v12.2l1-.2h5V5h-5a2 2 0 0 0-1 1Z'}"/></svg><h1>RisuWiki</h1></div><div class="target" title="${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '')}">${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '채팅 선택 필요')}</div><div class="row"><button id="theme-toggle" class="pill theme-btn" aria-label="${themeLabel()}" title="${themeLabel()}">${themeIcon()}</button></div></header>
+      <header class="top"><div class="brand"><svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${brandIcon()}</svg><h1>RisuWiki</h1></div><div class="target" title="${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '')}">${esc(ui.target ? `${ui.target.characterName} / ${ui.target.chatName}` : '채팅 선택 필요')}</div><div class="row"><button id="theme-toggle" class="pill theme-btn" aria-label="${themeLabel()}" title="${themeLabel()}">${themeIcon()}</button></div></header>
       <div class="tabs"><nav class="tab-list" role="tablist" aria-label="위키 메뉴">${TABS.map(([id, label, n]) => `<button class="tab${ui.tab === id ? ' on' : ''}" role="tab" data-tab="${id}" aria-selected="${ui.tab === id}">${label}${n !== '' ? `<span class="n">${n}</span>` : ''}</button>`).join('')}</nav><button id="sticky-close" class="pill tabs-close">닫기</button></div>
       <div id="status" class="status" role="status" aria-live="polite">${esc(ui.status)}</div>
       ${ui.pending ? `<section class="preview-banner"><div class="row"><strong>${ui.pending.partial ? '미저장 부분 초안' : '미저장 초안'} · ${changed}개 문서 변경 · ${removed.length}개 제거</strong><span style="flex:1"></span><button id="apply" class="primary"${disabled(ui.busy)}>초안 저장</button><button id="discard" class="ghost"${disabled(ui.busy)}>초안 버리기</button></div><p class="muted" style="margin:8px 0 0">문서를 선택해 변경 전후를 확인할 수 있습니다. 저장해야 원문 처리 이력도 함께 반영됩니다.</p>${removed.length ? `<details><summary>제거될 기존 문서 확인</summary>${removed.map(d => `<details><summary>${esc(d.title)}</summary><pre style="white-space:pre-wrap">${esc(d.body)}</pre></details>`).join('')}</details>` : ''}</section>` : ''}
@@ -755,9 +1236,25 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     const source = d.body, language = translationLanguage();
     const controller = new AbortController(), signal = controller.signal;
     ui.busy = true; ui.controller = controller; translatingId = d.id;
-    setStatus(`번역 보조모델로 본문을 번역 중입니다. 도착 언어: ${language}. 추가 모델 호출을 사용합니다.`); render();
+    setStatus('저장된 번역을 확인 중입니다.'); render();
     let timer, abort;
     try {
+      // Content-addressed keys retain translations across reloads and language changes.
+      const cacheKey = `risuwiki:translation:v1:${await Core.hash([source, language])}`;
+      let stored;
+      try {
+        const raw = await R.pluginStorage.getItem(cacheKey);
+        stored = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      } catch (e) { console.warn('[Risu Wiki] Translation cache read failed', e); }
+      signal.throwIfAborted();
+      Core.assert(alive && state().documents.find(x => x.id === d.id)?.body === source,
+        '번역 중 문서가 변경되었습니다. 다시 시도하세요.');
+      if (stored?.source === source && stored.language === language && typeof stored.body === 'string' && stored.body.trim()) {
+        translations.set(d.id, {source, language, body: stored.body, visible: true});
+        setStatus(`${language} 저장된 번역을 표시했습니다. 추가 모델 호출은 없습니다.`);
+        return;
+      }
+      setStatus(`번역 보조모델로 본문을 번역 중입니다. 도착 언어: ${language}. 추가 모델 호출을 사용합니다.`);
       Core.assert(typeof R.runLLMModel === 'function', 'runLLMModel API가 필요합니다. Risu를 업데이트하세요.');
       // Hide link targets from the translator, then restore them exactly.
       const links = [], prefix = `RISUWIKI_${Core.uid()}_LINK_`;
@@ -787,7 +1284,14 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
       Core.assert(alive && state().documents.find(x => x.id === d.id)?.body === source,
         '번역 중 문서가 변경되었습니다. 다시 시도하세요.');
       translations.set(d.id, {source, language, body, visible: true});
-      setStatus(`${language} 번역 완료 · 화면 표시만 변경했습니다. 원문 보기로 전환할 수 있습니다.`);
+      // A storage failure must not discard a successfully translated body.
+      try {
+        await R.pluginStorage.setItem(cacheKey, JSON.stringify({source, language, body}));
+        setStatus(`${language} 번역 완료 · 캐시에 저장했습니다. 원문 보기로 전환할 수 있습니다.`);
+      } catch (e) {
+        console.warn('[Risu Wiki] Translation cache write failed', e);
+        setStatus(`${language} 번역 완료 · 캐시 저장에 실패해 이번 실행에서만 재사용할 수 있습니다.`);
+      }
     } catch (e) {
       setStatus(signal.aborted ? '번역을 취소했습니다. 원문은 유지됩니다. 모델 서버의 요청은 계속될 수 있습니다.' : `번역 실패: ${e.message || e}`);
     } finally {
@@ -1086,7 +1590,7 @@ Use the requested language. If there is nothing new, return {"operations":[]}.`;
     ui.tab = 'docs'; ui.selected = restored.documents[0]?.id || null; ui.folderFilter = ''; setStatus('공통 문서함 전체를 교체할 백업 초안입니다. 폴더·문서·처리 이력을 확인한 뒤 저장하세요.'); render();
   }
   try { const saved = await R.pluginStorage.getItem(THEME_KEY); if (saved === 'light' || saved === 'dark') ui.theme = saved; } catch { /* 기본 라이트 */ }
-  try { const savedSkin = await R.pluginStorage.getItem(SKIN_KEY); if (SKINS.some(x => x.id === savedSkin)) ui.skin = savedSkin; else if (savedSkin) await R.pluginStorage.setItem(SKIN_KEY, 'default'); } catch { /* 기본 스킨 */ }
+  try { const savedSkin = await R.pluginStorage.getItem(SKIN_KEY); if (SKINS.some(x => x.id === savedSkin)) ui.skin = savedSkin; } catch { /* 기본 스킨 */ }
   applyTheme();
   render();
   try {
