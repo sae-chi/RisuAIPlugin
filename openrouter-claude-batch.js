@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.12
+//@version 1.1.13
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -55,29 +55,45 @@
   function buildBody(args, c) {
     if (!Array.isArray(args.prompt_chat) || !args.prompt_chat.length) throw Error('전송할 대화가 없어.');
     const system = [], messages = [];
+    const cacheBlocks = new Set();
+    const markCache = block => {
+      if (c.cache === 'off' || !block) return;
+      block.cache_control = c.cache === '1h' ? {type: 'ephemeral', ttl: '1h'} : {type: 'ephemeral'};
+      cacheBlocks.add(block);
+    };
     for (const m of args.prompt_chat) {
       if (!m || !['system', 'developer', 'user', 'assistant'].includes(m.role)) throw Error('텍스트 대화만 지원해. 도구 메시지는 사용할 수 없어.');
       if (typeof m.content !== 'string' || m.multimodals?.length || m.images?.length || /\{\{inlayed::/.test(m.content))
         throw Error('이 버전은 텍스트 전용이야. 이미지·파일·인레이 첨부를 제거해.');
-      if (!m.content.trim()) continue;
+      if (!m.content.trim()) {
+        // An omitted empty message still ends the preceding reusable prefix.
+        if (m.cachePoint === true) markCache(messages.at(-1)?.content.at(-1) || system.at(-1));
+        continue;
+      }
+      const block = {type: 'text', text: m.content};
+      if (m.cachePoint === true) markCache(block);
       if (m.role === 'system' || m.role === 'developer') {
         // Leading instructions stay in Anthropic's system field; later instructions
         // keep their place in the conversation instead of being reordered globally.
-        if (!messages.length) { system.push({type: 'text', text: m.content}); continue; }
+        if (!messages.length) { system.push(block); continue; }
       }
       const role = m.role === 'assistant' ? 'assistant' : 'user';
-      const text = m.name ? `${m.name}: ${m.content}` : m.content;
+      block.text = m.name ? `${m.name}: ${m.content}` : m.content;
       const previous = messages.at(-1);
-      if (previous?.role === role) previous.content.push({type: 'text', text});
-      else messages.push({role, content: [{type: 'text', text}]});
+      // Keep separate content blocks even when roles merge: a Risu cachePoint
+      // must remain immediately after its original message, before later text.
+      if (previous?.role === role) previous.content.push(block);
+      else messages.push({role, content: [block]});
     }
     if (!messages.length) throw Error('사용자 또는 어시스턴트 메시지가 필요해.');
     if (messages[0].role !== 'user') messages.unshift({role: 'user', content: [{type: 'text', text: 'Continue the conversation.'}]});
     const max = Number(args.max_tokens);
     if (!Number.isInteger(max) || max < 1) throw Error('Risu의 최대 응답 토큰을 1 이상으로 설정해.');
     const body = {max_tokens: max, messages};
+    if (cacheBlocks.size > 4) throw Error('Risu 캐시 지점이 4개를 넘었어. 프롬프트의 캐시 지점을 4개 이하로 줄여줘. 배치는 전송하지 않았어.');
     if (system.length) {
-      if (c.cache !== 'off') system.at(-1).cache_control = c.cache === '1h' ? {type: 'ephemeral', ttl: '1h'} : {type: 'ephemeral'};
+      // Explicit Risu boundaries take priority over the legacy system fallback.
+      if (cacheBlocks.size < 4) markCache(system.at(-1));
       body.system = system;
     }
     if (c.thinking === 'none') {
@@ -687,7 +703,8 @@ a{color:var(--info)}
       const e = field(name, title, 'number'); e.min = min; e.max = max; e.step = 1; e.required = true;
     }
     field('thinking', '추론 강도', 'select', [['none', 'None'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
-    field('cache', '시스템 프롬프트 캐시', 'select', [['off', '끄기'], ['5m', '5분'], ['1h', '1시간']]);
+    field('cache', '프롬프트 캐시 · 시스템 + Risu 캐시 지점', 'select', [['off', '끄기'], ['5m', '5분'], ['1h', '1시간']]);
+    form.append(node('p', '캐시를 켜면 Risu의 자동·수동 캐시 지점을 대화에도 적용해. 기간은 이 프리셋 설정을 사용해. Risu 지점은 최대 4개이며, 여유가 있으면 시스템 끝에도 추가해. 실제 재사용 여부는 서버의 캐시 사용량에 따라 달라져.', 'hint wide'));
     const hint = node('p', '텍스트 전용 · 스트리밍 없음 · 최대 24시간 처리 창.  키·설정·작업·결과는 이 기기의 플러그인 로컬 저장소에 보관돼.', 'hint wide'); form.append(hint);
     // Risu's sandbox can omit allow-forms. Native submit is blocked BEFORE the
     // submit event, even when that handler calls preventDefault. Use a click.
