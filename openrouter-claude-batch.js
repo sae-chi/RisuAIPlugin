@@ -702,9 +702,8 @@ a{color:var(--info)}
     for (const [name, title, min, max] of [['pollSeconds', '조회 간격 (초)', 10, 600], ['waitMinutes', '한 번에 기다릴 시간 (분)', 1, 1440]]) {
       const e = field(name, title, 'number'); e.min = min; e.max = max; e.step = 1; e.required = true;
     }
-    field('thinking', '추론 강도', 'select', [['none', 'None'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
-    field('cache', '프롬프트 캐시 · 시스템 + Risu 캐시 지점', 'select', [['off', '끄기'], ['5m', '5분'], ['1h', '1시간']]);
-    form.append(node('p', '캐시를 켜면 Risu의 자동·수동 캐시 지점을 대화에도 적용해. 기간은 이 프리셋 설정을 사용해. Risu 지점은 최대 4개이며, 여유가 있으면 시스템 끝에도 추가해. 실제 재사용 여부는 서버의 캐시 사용량에 따라 달라져.', 'hint wide'));
+    field('thinking', '적응형 사고 강도', 'select', [['none', 'None'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
+    field('cache', '프롬프트 캐시', 'select', [['off', '끄기'], ['5m', '5분'], ['1h', '1시간']]);
     const hint = node('p', '텍스트 전용 · 스트리밍 없음 · 최대 24시간 처리 창.  키·설정·작업·결과는 이 기기의 플러그인 로컬 저장소에 보관돼.', 'hint wide'); form.append(hint);
     // Risu's sandbox can omit allow-forms. Native submit is blocked BEFORE the
     // submit event, even when that handler calls preventDefault. Use a click.
