@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.0
+//@version 1.1.2
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -346,12 +346,12 @@
       if (ci !== await Risuai.getCurrentCharacterIndex() || hi !== await Risuai.getCurrentChatIndex()) throw Error('채팅 전환 중이야. 다시 요청해.');
       return {scope: JSON.stringify([charId, chatId]), name: `${char.name || '캐릭터'} / ${chat.name || '채팅'}`};
     }
-    const providerTitle = p => p.id === 'legacy' ? 'OpenRouter Claude Batch' : `[OR Batch] ${p.name} · ${p.id.slice(0, 8)}`;
-    const registered = new Set();
+    const providerTitle = p => p.name;
+    const registered = new Map();
     async function registerPresets() {
       for (const preset of engine.presets) {
         const title = providerTitle(preset), id = preset.id;
-        if (registered.has(title)) continue;
+        if (registered.get(title) === id) continue;
         await Risuai.addProvider(title, async (args, signal) => {
       const selected = engine.presets.find(p => p.id === id);
       if (!selected || providerTitle(selected) !== title) return fail('삭제되거나 이름이 바뀐 프리셋이야. 새 프리셋을 선택해. 이전 목록은 리수를 다시 열면 정리돼.');
@@ -364,7 +364,7 @@
       catch (e) { return fail(safeError(e, key)); }
       finally { waiters.delete(controller); signal?.removeEventListener('abort', cancel); }
     }, {tokenizer: 'gpt-4'});
-        registered.add(title);
+        registered.set(title, id);
       }
     }
     await registerPresets();
@@ -432,14 +432,30 @@
     field('effort', '사고 강도 · 모델별 지원 확인', 'select', [['', '모델 기본값'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
     const cacheLabel = node('label', '시스템 프롬프트 캐시 요청', 'check'); const cache = node('input'); cache.type = 'checkbox'; inputs.cache = cache; cacheLabel.append(cache); form.append(cacheLabel);
     const hint = node('p', '텍스트 전용 · 스트리밍 없음 · 최대 24시간 처리 창. 사고/캐시 지원과 할인율은 모델에 따라 달라. 키·설정·작업·결과는 이 기기의 플러그인 로컬 저장소에 보관돼.', 'hint wide'); form.append(hint);
-    const actions = node('div', null, 'actions wide'); const save = node('button', '프리셋 저장', 'primary'); save.type = 'submit'; actions.append(save); form.append(actions);
+    // Risu's sandbox can omit allow-forms. Native submit is blocked BEFORE the
+    // submit event, even when that handler calls preventDefault. Use a click.
+    const actions = node('div', null, 'actions wide'); const save = node('button', '프리셋 저장', 'primary'); save.type = 'button'; actions.append(save); form.append(actions);
+    const saveStatus = node('div', '', 'notice wide'); saveStatus.setAttribute('aria-live', 'polite'); form.append(saveStatus);
     function readForm() { return Object.fromEntries(Object.keys(DEFAULTS).map(k => [k, k === 'cache' ? inputs[k].checked : inputs[k].value])); }
-    form.addEventListener('submit', async event => {
-      event.preventDefault(); save.disabled = true;
+    async function savePresetForm() {
+      if (save.disabled) return;
+      save.disabled = true; saveStatus.textContent = '프리셋을 저장 중이야…';
       try {
         const p = await engine.savePreset(selectedId, nameInput.value, readForm()); selectedId = p.id;
-        await registerPresets(); fill(); notice.textContent = `저장했어. 리수 모델에서 ${providerTitle(p)}를 선택해.`;
-      } catch (e) { notice.textContent = safeError(e, key); } finally { save.disabled = false; }
+        fill();
+        try { await registerPresets(); }
+        catch (e) { throw Error(`프리셋은 저장됐지만 모델 등록에 실패했어. 리수를 다시 열어줘. ${safeError(e, key)}`); }
+        notice.textContent = saveStatus.textContent = `저장했어. 리수 모델에서 ${providerTitle(p)}를 선택해.`;
+      } catch (e) {
+        notice.textContent = saveStatus.textContent = safeError(e, key);
+      } finally { save.disabled = false; }
+    }
+    save.addEventListener('click', savePresetForm);
+    form.addEventListener('submit', event => event.preventDefault());
+    form.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.isComposing && event.target.tagName === 'INPUT' && event.target.type !== 'checkbox') {
+        event.preventDefault(); void savePresetForm();
+      }
     });
     const toolbar = node('div', null, 'actions'); root.append(toolbar);
     toolbar.append(button('작업 새로고침', async () => {
