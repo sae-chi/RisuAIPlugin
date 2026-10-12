@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.8
+//@version 1.1.9
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -205,6 +205,12 @@
     async getOrSubmit(args, context, c, signal, presetId = this.presets[0].id) {
       stopped(signal);
       const {key, keyHash} = await this.credentials();
+      // Explicit UI consent takes priority over regenerated prompt content.
+      // The saved result must never cause another paid batch submission.
+      const armed = this.jobs.find(j => j.manualClaimArmed === true && j.result && !j.consumed &&
+        !j.released && j.keyHash === keyHash && j.context.scope === context.scope &&
+        (j.presetId || 'legacy') === presetId);
+      if (armed) return armed;
       const body = buildBody(args, c);
       // Preserve the legacy signature for saved jobs and add a mode-independent
       // fingerprint. Regeneration may set args.mode differently from generation.
@@ -223,14 +229,17 @@
         const sameContent = this.jobs.find(j => j.contentSignature === contentSignature && j.keyHash === keyHash &&
           j.context.scope === context.scope && (j.presetId || 'legacy') === presetId && !j.released);
         if (sameContent) return sameContent;
-        // Legacy saved jobs and changed prompts require explicit user selection.
-        const chosen = this.jobs.find(j => j.manualClaimArmed === true && j.result && !j.consumed &&
-          !j.released && j.keyHash === keyHash && j.context.scope === context.scope &&
-          (j.presetId || 'legacy') === presetId);
-        if (chosen) return chosen;
         const outstanding = this.jobs.find(j => j.context.scope === context.scope && (j.presetId || 'legacy') === presetId && !j.released &&
           (ACTIVE.has(j.status) || ['unknown', 'submitting'].includes(j.status) || (j.result && !j.consumed)));
-        if (outstanding) throw Error('이 채팅·프리셋에 처리 중이거나 미수령 배치가 있어. 재생성 입력이 기존 요청과 달라 자동 연결하지 않았어. 완료된 작업은 설정 → OpenRouter Claude Batch → 「다음 재생성에서 이 결과 받기」로 직접 선택할 수 있어. 새 배치는 만들지 않았어.');
+        if (outstanding) {
+          if (outstanding.result && !outstanding.consumed) {
+            if (outstanding.keyHash !== keyHash) throw Error('미수령 배치를 접수한 OpenRouter API 키를 다시 설정해. 새 배치는 만들지 않았어.');
+            // Prompt or settings may have changed. Retrieval still requires
+            // the explicit UI action instead of an exact request fingerprint.
+            return outstanding;
+          }
+          throw Error('이 채팅·프리셋에 처리 중이거나 접수가 불명확한 배치가 있어. 플러그인 작업 목록에서 상태를 확인해. 새 배치는 만들지 않았어.');
+        }
         stopped(signal);
         const id = this.uuid();
         const j = {id, customId: `orcb-${id}`, signature, contentSignature, keyHash, batchId: '', model: c.model,
@@ -339,6 +348,8 @@
       if (j.context.scope !== context.scope) throw Error('채팅이 바뀌었어. 원래 채팅에서 다시 요청해.');
       if (j.consumed || this.claiming.has(j.id)) throw Error('이미 반환한 결과야. 새 작업은 작업 목록에서 재요청을 허용한 뒤 보내줘.');
       if (!j.result) throw Error('아직 결과가 없어.');
+      if (j.responseMode !== 'wait' && !j.manualClaimArmed)
+        throw Error('먼저 플러그인 작업 목록에서 이 배치의 「수령」 버튼을 누른 뒤 원래 채팅에서 재생성해.');
       this.claiming.add(j.id);
       try {
         const prior = {consumed: j.consumed, consumedAt: j.consumedAt, manualClaimArmed: j.manualClaimArmed};
@@ -361,9 +372,15 @@
             await this.refresh(j); if (TERMINAL.has(j.status)) j.checkedTerminal = true;
           }
           stopped(signal);
-          if (j.result) return await this.claim(j, await currentContext(), signal);
+          if (j.result) {
+            if (j.responseMode !== 'wait' && !j.manualClaimArmed) {
+              this.announce({kind: 'claim_required', batchId: j.batchId, chatName: j.context.name});
+              return fail('배치 결과는 준비됐지만 아직 수령을 선택하지 않았어.\n설정 → OpenRouter Claude Batch → 해당 작업의 「수령」을 누르고, 원래 채팅에서 다시 재생성해.\n새 유료 배치는 만들지 않았어.');
+            }
+            return await this.claim(j, await currentContext(), signal);
+          }
           if (TERMINAL.has(j.status)) throw Error(j.error || `작업 ${j.status}`);
-          if (c.mode === 'defer') return fail(`${j.status === 'unknown' ? 'OpenRouter 배치 접수 확인 중' : 'OpenRouter 배치 접수 안내'}\n배치 ID: ${j.batchId}\n${j.lookupNotice || j.lastError || '정상적으로 접수됐어. 완료 후 원래 채팅에서 응답 재생성을 누르면 저장된 결과를 받을 수 있어.'}\n이 메시지는 Claude 응답이 아니야. 새 사용자 메시지를 보내거나 새 작업 허용을 누르지 마.\n설정 → OpenRouter Claude Batch에서도 확인할 수 있어.`);
+          if (c.mode === 'defer') return fail(`${j.status === 'unknown' ? 'OpenRouter 배치 접수 확인 중' : 'OpenRouter 배치 접수 안내'}\n배치 ID: ${j.batchId}\n${j.lookupNotice || j.lastError || '정상적으로 접수됐어. 완료 후 플러그인 작업 목록에서 「수령」을 선택하고 원래 채팅에서 재생성해야 결과를 받을 수 있어.'}\n이 메시지는 Claude 응답이 아니야. 새 사용자 메시지를 보내거나 새 작업 허용을 누르지 마.\n설정 → OpenRouter Claude Batch에서도 확인할 수 있어.`);
           if (this.now() >= deadline) return fail('대기 시간이 끝났어. 서버 작업은 유지돼. 같은 입력으로 다시 요청해.');
           await sleep(Math.min(Math.max(1000, (j.nextPollAt || this.now() + c.pollSeconds * 1000) - this.now()), deadline - this.now()), signal);
         }
@@ -432,15 +449,16 @@
         const banner = await rootDoc.createElement('div');
         await banner.setStyleAttribute('position:fixed;top:16px;right:16px;z-index:9999;width:360px;max-width:calc(100vw - 32px);background:#172235;color:#f5f7fc;border:1px solid #8195c9;border-radius:12px;padding:16px;box-shadow:0 10px 32px rgba(0,0,0,.36);font:14px/1.6 system-ui,sans-serif;overflow-wrap:anywhere');
         const heading = await rootDoc.createElement('div');
-        const titles = {submitted:'📦 OpenRouter 배치 접수 완료', uncertain:'⚠️ 배치 접수 여부 확인 중', completed:'✅ Claude 배치 결과 준비 완료'};
+        const titles = {submitted:'📦 OpenRouter 배치 접수 완료', uncertain:'⚠️ 배치 접수 여부 확인 중', completed:'✅ Claude 배치 결과 준비 완료', claim_required:'📦 수령 버튼을 먼저 눌러줘'};
         await heading.setTextContent(titles[payload.kind] || 'OpenRouter Claude Batch');
         await heading.setStyleAttribute('font-weight:700;font-size:16px;margin-bottom:8px');
         await banner.appendChild(heading);
         const detail = await rootDoc.createElement('div');
         const messages = {
-          submitted: '배치 작업을 접수했어. 완료 후 원래 채팅에서 같은 입력의 응답을 재생성하면 결과를 받을 수 있어. 새 메시지를 보내지 마.',
+          submitted: '배치 작업을 접수했어. 완료 후 설정 → OpenRouter Claude Batch의 작업 목록에서 「수령」을 누른 다음 원래 채팅에서 재생성해. 새 메시지를 보내지 마.',
           uncertain: 'OpenRouter가 배치 ID를 언급했지만 접수 성공을 확인하지 못했어. 같은 ID로 조회만 재시도 중이야. 중복 제출을 피하려면 새 작업을 만들지 마.',
-          completed: '배치 결과가 저장됐어! 원래 채팅으로 돌아가 응답 재생성(Regenerate)을 누르면 채팅에 답변이 나타나.'
+          completed: '배치 결과가 저장됐어! 설정 → OpenRouter Claude Batch에서 해당 작업의 「수령」을 먼저 누른 뒤, 원래 채팅으로 돌아가 응답 재생성을 눌러.',
+          claim_required: '아직 수령을 선택하지 않았어. 설정 → OpenRouter Claude Batch → 작업 목록에서 해당 배치의 「수령」 버튼을 누르고, 원래 채팅으로 돌아가 재생성해. 새 배치는 접수하지 않았어.'
         };
         await detail.setTextContent(`${messages[payload.kind] || ''}\n채팅: ${payload.chatName || '원래 채팅'}\n배치 ID: ${payload.batchId || '확인 중'}`);
         await detail.setStyleAttribute('white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:12px');
@@ -546,7 +564,7 @@
     }
     const nameInput = field('presetName', '프리셋 이름', 'text'); nameInput.required = true; nameInput.maxLength = 60;
     const modelInput = field('model', 'Claude 모델 ID', 'text'); modelInput.placeholder = 'anthropic/claude-…'; modelInput.required = true;
-    field('mode', '수신 방식', 'select', [['defer', '접수 후 재요청으로 받기'], ['wait', '완료될 때까지 기다리기']]);
+    field('mode', '수신 방식', 'select', [['defer', '접수 → UI 수령 → 재생성'], ['wait', '완료될 때까지 기다리기']]);
     field('provider', '공급자 고정 · 비워두면 자동', 'text').placeholder = '예: anthropic';
     for (const [name, title, min, max] of [['pollSeconds', '조회 간격 (초)', 10, 600], ['waitMinutes', '한 번에 기다릴 시간 (분)', 1, 1440], ['budget', '고정 사고 예산 (토큰)', 1024, 128000]]) {
       const e = field(name, title, 'number'); e.min = min; e.max = max; e.step = 1; e.required = true;
@@ -625,16 +643,16 @@
         if (j.batchId && !j.result && !j.remoteDeleted) row.append(button('조회', async () => { await engine.refresh(j); renderJobs(); }));
         if (j.result && j.consumed && !j.released) row.append(button('같은 결과 다시 받기', async () => {
           j.consumed = false; j.manualClaimArmed = false; await engine.persist();
-          notice.textContent = '이 결과를 다시 수령할 수 있게 됐어. 원래 채팅에서 재생성하거나 아래 버튼으로 결과를 지정해.';
+          notice.textContent = '이 결과를 다시 수령할 수 있게 됐어. 아래 「수령」을 누른 뒤 원래 채팅에서 재생성해.';
         }));
         if (j.result && !j.consumed && !j.released) row.append(button(
-          j.manualClaimArmed ? '선택 취소' : '다음 재생성에서 이 결과 받기', async () => {
+          j.manualClaimArmed ? '수령 선택 취소' : '수령', async () => {
             if (!j.manualClaimArmed && !confirm(
-              `선택한 배치 결과를 다음 재생성에서 채팅으로 반환할까?\n\n채팅: ${j.context.name}\n모델: ${j.model}\n배치: ${j.batchId}\n\n실제 재생성 프롬프트가 달라도 이 결과를 사용해. 원래 채팅에서만 적용되며 새 API 요청은 보내지 않아.`)) return;
+              `이 배치의 결과를 수령 준비할까?\n\n채팅: ${j.context.name}\n모델: ${j.model}\n배치: ${j.batchId}\n\n확인 후 원래 채팅에서 응답 재생성을 눌러줘. 새 유료 요청은 보내지 않아.`)) return;
             await engine.setManualClaim(j, !j.manualClaimArmed);
             renderJobs();
             notice.textContent = j.manualClaimArmed
-              ? '수령할 결과를 선택했어. 해당 채팅으로 돌아가 응답 재생성을 눌러줘. 같은 채팅·프리셋·API 키에서만 적용돼.'
+              ? '수령 준비 완료! 해당 채팅으로 돌아가 응답 재생성을 눌러줘. 같은 채팅·프리셋·API 키에서만 적용돼.'
               : '결과 선택을 취소했어.';
           }));
         if (!j.released && (TERMINAL.has(j.status) || j.status === 'unknown')) row.append(button('새 작업 허용', async () => {
