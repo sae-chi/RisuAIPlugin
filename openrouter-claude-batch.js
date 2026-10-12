@@ -686,9 +686,9 @@ a{color:var(--info)}
     for (const [name, title, min, max] of [['pollSeconds', '조회 간격 (초)', 10, 600], ['waitMinutes', '한 번에 기다릴 시간 (분)', 1, 1440]]) {
       const e = field(name, title, 'number'); e.min = min; e.max = max; e.step = 1; e.required = true;
     }
-    field('thinking', '사고 · 모델별 지원 확인', 'select', [['none', '끄기 (none)'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
-    field('cache', '시스템 프롬프트 캐시 · 모델별 지원 확인', 'select', [['off', '끄기'], ['5m', '5분'], ['1h', '1시간']]);
-    const hint = node('p', '텍스트 전용 · 스트리밍 없음 · 최대 24시간 처리 창. 사고를 켜면(Low~Max) 온도 설정을 보내지 않고 어시스턴트 프리필도 쓸 수 없어. 사고/캐시 지원과 할인율은 모델에 따라 달라. 키·설정·작업·결과는 이 기기의 플러그인 로컬 저장소에 보관돼.', 'hint wide'); form.append(hint);
+    field('thinking', '추론 강도', 'select', [['none', 'None'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
+    field('cache', '시스템 프롬프트 캐시', 'select', [['off', '끄기'], ['5m', '5분'], ['1h', '1시간']]);
+    const hint = node('p', '텍스트 전용 · 스트리밍 없음 · 최대 24시간 처리 창.  키·설정·작업·결과는 이 기기의 플러그인 로컬 저장소에 보관돼.', 'hint wide'); form.append(hint);
     // Risu's sandbox can omit allow-forms. Native submit is blocked BEFORE the
     // submit event, even when that handler calls preventDefault. Use a click.
     const actions = node('div', null, 'actions wide'); const save = node('button', '프리셋 저장', 'primary'); save.type = 'button'; actions.append(save); form.append(actions);
