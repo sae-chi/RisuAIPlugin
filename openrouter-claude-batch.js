@@ -2,11 +2,8 @@
 //@display-name OpenRouter Claude Batch
 //@api 3.0
 //@version 1.1.0
-//@link https://openrouter.ai/docs/batch-quickstart Batch API
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
-/* Independent implementation. Provider Manager was consulted for workflow only.
- * No dependencies, automatic updates, external proxy, or direct chat database writes.
- */
 (() => {
   'use strict';
   const BASE = 'https://openrouter.ai/api/v1/batches';
