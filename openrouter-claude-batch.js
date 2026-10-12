@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.10
+//@version 1.1.11
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -436,7 +436,27 @@
     let opened = false, disposed = false, timer, busy = false;
     const waiters = new Set();
     let floatingNotice = null;
+    let floatingNoticeHandlers = [];
     let noticeQueue = Promise.resolve();
+    // SafeElement attaches click handlers to document, not to the button.
+    // Verify the click coordinates and remove each listener with its toast.
+    async function dismissFloatingNotice() {
+      const banner = floatingNotice;
+      floatingNotice = null;
+      const handlers = floatingNoticeHandlers;
+      floatingNoticeHandlers = [];
+      for (const [element, id] of handlers) {
+        try { await element.removeEventListener('click', id); } catch { /* best effort */ }
+      }
+      if (banner) { try { await banner.remove(); } catch { /* best effort */ } }
+    }
+    async function toastButtonHit(button, event) {
+      const x = event?.clientX, y = event?.clientY;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+      const rect = await button.getBoundingClientRect();
+      return !!rect && rect.width > 0 && rect.height > 0 &&
+        x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+    }
     // The plugin iframe is hidden during chatting. Draw in RisuAI's main DOM
     // using the documented SafeDocument API, not in the hidden settings iframe.
     function showChatNotice(payload) {
@@ -445,8 +465,16 @@
         const rootDoc = await Risuai.getRootDocument();
         const body = await rootDoc.querySelector('body');
         if (!body) return;
-        if (floatingNotice) { await floatingNotice.remove(); floatingNotice = null; }
+        if (floatingNotice) await dismissFloatingNotice();
         const banner = await rootDoc.createElement('div');
+        const handlers = [];
+        async function attachToastClick(button, action) {
+          const id = await button.addEventListener('click', async event => {
+            if (floatingNotice !== banner || !(await toastButtonHit(button, event))) return;
+            await action();
+          });
+          handlers.push([button, id]);
+        }
         await banner.setStyleAttribute('position:fixed;top:16px;right:16px;z-index:9999;width:360px;max-width:calc(100vw - 32px);background:#172235;color:#f5f7fc;border:1px solid #8195c9;border-radius:12px;padding:16px;box-shadow:0 10px 32px rgba(0,0,0,.36);font:14px/1.6 system-ui,sans-serif;overflow-wrap:anywhere');
         const heading = await rootDoc.createElement('div');
         const titles = {submitted:'📦 OpenRouter 배치 접수 완료', uncertain:'⚠️ 배치 접수 여부 확인 중', completed:'✅ Claude 배치 결과 준비 완료', claim_required:'📦 수령 버튼을 먼저 눌러줘'};
@@ -469,12 +497,10 @@
           const open = await rootDoc.createElement('button');
           await open.setTextContent('플러그인 UI 열기');
           await open.setStyleAttribute('background:#405eaa;color:#fff;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
-          await open.addEventListener('click', async () => {
+          await attachToastClick(open, async () => {
             try {
-              // Same initialization as opening the plugin from Risu's settings.
               await openBatchUI(true);
-              try { await banner.remove(); } catch { /* best effort */ }
-              if (floatingNotice === banner) floatingNotice = null;
+              if (floatingNotice === banner) await dismissFloatingNotice();
             } catch (e) {
               console.warn('[OpenRouter Claude Batch] UI 바로 열기 실패', safeError(e));
               await detail.setTextContent(`${messages[payload.kind] || ''}\n플러그인 UI를 열지 못했어. Risu 설정에서 OpenRouter Claude Batch를 직접 열어줘.\n채팅: ${payload.chatName || '원래 채팅'}\n배치 ID: ${payload.batchId || '확인 중'}`);
@@ -485,14 +511,14 @@
         const close = await rootDoc.createElement('button');
         await close.setTextContent('확인 · 닫기');
         await close.setStyleAttribute('background:#334155;color:#fff;border:1px solid #64748b;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
-        await close.addEventListener('click', async () => {
-          try { await banner.remove(); } catch { /* best effort */ }
-          if (floatingNotice === banner) floatingNotice = null;
+        await attachToastClick(close, async () => {
+          if (floatingNotice === banner) await dismissFloatingNotice();
         });
         await actions.appendChild(close);
         await banner.appendChild(actions);
         await body.appendChild(banner);
         floatingNotice = banner;
+        floatingNoticeHandlers = handlers;
       }).catch(e => { console.warn('[OpenRouter Claude Batch] 별도 안내 패널 표시 실패', safeError(e)); });
       return noticeQueue;
     }
@@ -721,7 +747,7 @@
     await Risuai.onUnload(async () => {
       disposed = true; clearTimeout(timer); for (const c of waiters) c.abort();
       if (ui?.id) await Risuai.unregisterUIPart(ui.id);
-      try { await noticeQueue; if (floatingNotice) await floatingNotice.remove(); } catch { /* optional UI */ }
+      try { await noticeQueue; await dismissFloatingNotice(); } catch { /* optional UI */ }
       style.remove(); root.remove();
     });
   }
