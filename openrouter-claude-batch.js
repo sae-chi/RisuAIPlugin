@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.11
+//@version 1.1.12
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -15,7 +15,7 @@
   const TERMINAL = new Set(['completed', 'failed', 'expired', 'cancelled']);
   const ACTIVE = new Set(['validating', 'in_progress', 'finalizing', 'cancelling']);
   const DEFAULTS = Object.freeze({model: '', mode: 'defer', pollSeconds: 30,
-    waitMinutes: 30, provider: '', thinking: 'off', budget: 4096, effort: '', cache: false});
+    waitMinutes: 30, provider: '', thinking: 'high', cache: 'off'});
   const copy = value => JSON.parse(JSON.stringify(value));
   const fail = message => ({success: false, content: message});
   const record = x => !!x && typeof x === 'object' && !Array.isArray(x);
@@ -36,15 +36,20 @@
     if ((requireModel || c.model) && !/^anthropic\/claude-[a-zA-Z0-9._-]+(?::batch)?$/.test(c.model))
       throw Error('모델 ID는 anthropic/claude-… 형식으로 입력해. 배치 지원 모델인지도 확인해.');
     if (!['wait', 'defer'].includes(c.mode)) throw Error('수신 모드를 확인해.');
-    for (const [k, min, max] of [['pollSeconds', 10, 600], ['waitMinutes', 1, 1440], ['budget', 1024, 128000]]) {
+    for (const [k, min, max] of [['pollSeconds', 10, 600], ['waitMinutes', 1, 1440]]) {
       c[k] = Number(c[k]);
       if (!Number.isInteger(c[k]) || c[k] < min || c[k] > max) throw Error(`${k}: ${min}~${max} 정수로 입력해.`);
     }
     c.provider = String(c.provider || '').trim();
     if (c.provider && !/^[a-zA-Z0-9._/-]+$/.test(c.provider)) throw Error('공급자 slug를 하나만 입력해.');
-    if (!['off', 'enabled', 'adaptive'].includes(c.thinking)) throw Error('사고 모드를 확인해.');
-    if (!['', 'low', 'medium', 'high', 'max'].includes(c.effort)) throw Error('사고 강도를 확인해.');
-    c.cache = c.cache === true;
+    // Older presets stored cache as a boolean and thinking as off/enabled/adaptive.
+    if (c.cache === true) c.cache = '5m'; else if (c.cache === false || c.cache == null || c.cache === '') c.cache = 'off';
+    if (!['off', '5m', '1h'].includes(c.cache)) throw Error('프롬프트 캐시 설정을 확인해.');
+    // thinking = none | low | medium | high | max. Anything but none sends adaptive thinking with that effort.
+    // Legacy values: off -> none; adaptive/enabled -> the old separate effort, else high (the API default).
+    const levels = ['low', 'medium', 'high', 'max'];
+    if (c.thinking === 'off') c.thinking = 'none';
+    else if (!['none', ...levels].includes(c.thinking)) c.thinking = levels.includes(c.effort) ? c.effort : 'high';
     return Object.fromEntries(Object.keys(DEFAULTS).map(k => [k, c[k]]));
   }
   function buildBody(args, c) {
@@ -72,18 +77,18 @@
     if (!Number.isInteger(max) || max < 1) throw Error('Risu의 최대 응답 토큰을 1 이상으로 설정해.');
     const body = {max_tokens: max, messages};
     if (system.length) {
-      if (c.cache) system.at(-1).cache_control = {type: 'ephemeral'};
+      if (c.cache !== 'off') system.at(-1).cache_control = c.cache === '1h' ? {type: 'ephemeral', ttl: '1h'} : {type: 'ephemeral'};
       body.system = system;
     }
-    if (c.thinking !== 'off') {
-      if (messages.at(-1).role === 'assistant') throw Error('사고 모드에서는 어시스턴트 프리필을 제거해.');
-      if (c.thinking === 'enabled' && c.budget >= max) throw Error('사고 예산보다 최대 응답 토큰을 크게 설정해.');
-      body.thinking = c.thinking === 'adaptive' ? {type: 'adaptive'} : {type: 'enabled', budget_tokens: c.budget};
-    } else if (Number.isFinite(args.temperature)) {
+    if (c.thinking === 'none') {
       // Risu passes provider sampling arguments in API units, already divided by 100.
-      body.temperature = Math.max(0, Math.min(1, args.temperature));
+      if (Number.isFinite(args.temperature)) body.temperature = Math.max(0, Math.min(1, args.temperature));
+    } else {
+      // Anthropic rejects sampling overrides and assistant prefill with thinking on.
+      if (messages.at(-1).role === 'assistant') throw Error('사고 모드(Adaptive)에서는 어시스턴트 프리필을 제거해.');
+      body.thinking = {type: 'adaptive'};
+      body.output_config = {effort: c.thinking};
     }
-    if (c.effort) body.output_config = {effort: c.effort};
     return body;
   }
   function envelope(c, body, customId) {
@@ -475,7 +480,7 @@
           });
           handlers.push([button, id]);
         }
-        await banner.setStyleAttribute('position:fixed;top:16px;right:16px;z-index:9999;width:360px;max-width:calc(100vw - 32px);background:#172235;color:#f5f7fc;border:1px solid #8195c9;border-radius:12px;padding:16px;box-shadow:0 10px 32px rgba(0,0,0,.36);font:14px/1.6 system-ui,sans-serif;overflow-wrap:anywhere');
+        await banner.setStyleAttribute('position:fixed;top:16px;right:16px;z-index:9999;width:360px;max-width:calc(100vw - 32px);background:#1a1e27;color:#e7e9ef;border:1px solid #2e3546;border-left:3px solid #e9b872;border-radius:10px;padding:16px 18px;box-shadow:0 10px 32px rgba(0,0,0,.4);font:14px/1.6 system-ui,sans-serif;overflow-wrap:anywhere');
         const heading = await rootDoc.createElement('div');
         const titles = {submitted:'📦 OpenRouter 배치 접수 완료', uncertain:'⚠️ 배치 접수 여부 확인 중', completed:'✅ Claude 배치 결과 준비 완료', claim_required:'📦 수령 버튼을 먼저 눌러줘'};
         await heading.setTextContent(titles[payload.kind] || 'OpenRouter Claude Batch');
@@ -496,7 +501,7 @@
         if (payload.kind === 'completed' || payload.kind === 'claim_required') {
           const open = await rootDoc.createElement('button');
           await open.setTextContent('플러그인 UI 열기');
-          await open.setStyleAttribute('background:#405eaa;color:#fff;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
+          await open.setStyleAttribute('background:#e9b872;color:#1b1408;font-weight:650;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
           await attachToastClick(open, async () => {
             try {
               await openBatchUI(true);
@@ -510,7 +515,7 @@
         }
         const close = await rootDoc.createElement('button');
         await close.setTextContent('확인 · 닫기');
-        await close.setStyleAttribute('background:#334155;color:#fff;border:1px solid #64748b;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
+        await close.setStyleAttribute('background:transparent;color:#e7e9ef;border:1px solid #2e3546;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
         await attachToastClick(close, async () => {
           if (floatingNotice === banner) await dismissFloatingNotice();
         });
@@ -562,28 +567,94 @@
     };
     const root = node('main');
     const style = node('style');
-    style.textContent = `:root{color-scheme:dark;font:15px/1.55 system-ui,sans-serif;color:#e5e7eb;background:#111827}*{box-sizing:border-box}body{margin:0}main{max-width:960px;margin:auto;padding:24px}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 14px}p{margin:8px 0 16px;color:#b8c1d1}header,.actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}header{justify-content:space-between;margin-bottom:18px}section,article{background:#1f2937;border:1px solid #475569;border-radius:10px;padding:18px;margin:14px 0}form{display:grid;grid-template-columns:1fr 1fr;gap:16px}label{display:flex;flex-direction:column;gap:6px;font-size:14px}input,select,textarea,button{font:inherit;color:inherit;background:#111827;border:1px solid #64748b;border-radius:6px;padding:9px 11px}input,select,textarea{width:100%;min-width:0}button{cursor:pointer;word-break:keep-all}button:hover{background:#334155}button:disabled{opacity:.5;cursor:default}button.primary{background:#334eb8;border-color:#7993ff}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #a5b4fc;outline-offset:2px}.wide{grid-column:1/-1}.hint,small{font-size:12px;color:#aebdd0}.notice{white-space:pre-wrap;overflow-wrap:anywhere;color:#c7d2fe;min-height:24px}.meta{font-size:12px;color:#aebdd0;overflow-wrap:anywhere}.error{color:#fca5a5;white-space:pre-wrap}.badge{display:inline-block;font-size:12px;background:#334155;border-radius:5px;padding:2px 8px;margin-right:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;font:14px/1.6 system-ui}details{margin-top:10px}summary{cursor:pointer}a{color:#b5c7ff}.check{flex-direction:row;align-items:center}.check input{width:auto}#jobs{margin-top:18px}@media(max-width:560px){main{padding:12px}form{grid-template-columns:1fr}h1{font-size:20px}section,article{padding:14px}.actions button{flex:1;min-width:130px}header button{padding:7px 10px}}`;
-    document.head.append(style); document.body.append(root);
-    const header = node('header'); header.append(node('h1', 'OpenRouter Claude Batch'));
-    function button(text, fn, primary = false) {
-      const b = node('button', text, primary ? 'primary' : ''); b.type = 'button';
+    style.textContent = `:root{--bg:#13161c;--panel:#1a1e27;--raised:#232938;--line:#2e3546;--text:#e7e9ef;--muted:#98a1b4;--accent:#e9b872;--accent-ink:#1b1408;--danger:#f08a8a;--ok:#78c796;--info:#7fb0f0;font:15px/1.6 Pretendard,system-ui,-apple-system,'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',sans-serif;color:var(--text);background:transparent}
+*{box-sizing:border-box}
+body{margin:0}
+html,body{height:100%;background:transparent}
+.backdrop{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(6,8,12,.62)}
+main{color-scheme:dark;color:var(--text);width:min(720px,100%);max-height:min(88vh,880px);overflow:auto;overscroll-behavior:contain;background:var(--bg);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 64px rgba(0,0,0,.55);padding:0 22px 24px}
+h1{font-size:19px;font-weight:700;margin:0;letter-spacing:-.01em}
+h2{font-size:15px;font-weight:650;margin:0 0 14px}
+p{margin:8px 0 14px;color:var(--muted)}
+header{position:sticky;top:0;z-index:2;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 0 14px;margin-bottom:16px;background:var(--bg);border-bottom:1px solid var(--line)}
+header p{margin:2px 0 0;font-size:13px}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+section,article{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+form{display:grid;grid-template-columns:1fr 1fr;gap:14px 16px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted)}
+input,select,textarea,button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px 11px}
+input,select,textarea{width:100%;min-width:0}
+input:hover,select:hover{border-color:#44506a}
+button{cursor:pointer;word-break:keep-all;background:transparent;transition:background .15s,border-color .15s}
+button:hover{background:var(--raised)}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:650}
+button.primary:hover{filter:brightness(1.08);background:var(--accent)}
+button.danger{color:var(--danger);border-color:#4b3039}
+button.danger:hover{background:#2a1d23}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.wide{grid-column:1/-1}
+.hint,small{font-size:12px;color:var(--muted)}
+.hint{margin:0}
+.notice,.error{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;margin:12px 0;padding:10px 14px;border-radius:6px;background:var(--raised);border-left:3px solid var(--accent);color:var(--text)}
+.notice:empty{display:none}
+.error{border-left-color:var(--danger);color:#fbc1c1}
+.meta{font-size:12px;color:var(--muted);overflow-wrap:anywhere;margin-top:2px}
+.job-head{display:flex;align-items:center;gap:10px;min-width:0}
+.job-head strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{--c:var(--muted);flex:none;display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent);border-radius:999px;padding:2px 10px 2px 8px}
+.badge::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
+article{border-left:3px solid var(--line)}
+article[data-status=completed]{border-left-color:var(--ok)}
+article[data-status=validating],article[data-status=in_progress],article[data-status=finalizing],article[data-status=submitting]{border-left-color:var(--info)}
+article[data-status=unknown],article[data-status=cancelling]{border-left-color:var(--accent)}
+article[data-status=failed],article[data-status=expired]{border-left-color:var(--danger)}
+article[data-status=completed] .badge{--c:var(--ok)}
+article[data-status=validating] .badge,article[data-status=in_progress] .badge,article[data-status=finalizing] .badge,article[data-status=submitting] .badge{--c:var(--info)}
+article[data-status=in_progress] .badge::before,article[data-status=submitting] .badge::before{animation:pulse 1.6s ease-in-out infinite}
+article[data-status=unknown] .badge,article[data-status=cancelling] .badge{--c:var(--accent)}
+article[data-status=failed] .badge,article[data-status=expired] .badge{--c:var(--danger)}
+article .actions{margin-top:14px}
+article .actions button{padding:5px 11px;font-size:13px}
+article>label{margin-top:12px}
+article>button{margin-top:10px}
+@keyframes pulse{50%{opacity:.3}}
+@media(prefers-reduced-motion:reduce){.badge::before{animation:none!important}}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;margin:8px 0 0;padding:12px 14px;background:var(--bg);border:1px solid var(--line);border-radius:6px;font:14px/1.65 inherit}
+details{margin-top:10px}
+summary{cursor:pointer;color:var(--muted);font-size:13px}
+summary:hover{color:var(--text)}
+a{color:var(--info)}
+.check{flex-direction:row;align-items:center;gap:10px;color:var(--text)}
+.check input{width:auto;accent-color:var(--accent)}
+#jobs{margin-top:28px}
+#jobs>h2{margin-bottom:0}
+@media(max-width:560px){.backdrop{padding:8px}main{max-height:96vh;border-radius:12px;padding:0 12px 24px}form{grid-template-columns:1fr}section,article{padding:14px}.actions button{flex:1;min-width:120px}header p{display:none}}`;
+    const backdrop = node('div', null, 'backdrop'); backdrop.append(root);
+    document.head.append(style); document.body.append(backdrop);
+    const header = node('header'); const brand = node('div'); brand.append(node('h1', 'OpenRouter Claude Batch'), node('p', 'Claude 배치 요청 설정 · 작업 수령')); header.append(brand);
+    function button(text, fn, variant = false) {
+      const b = node('button', text, variant === true ? 'primary' : variant || ''); b.type = 'button';
       b.addEventListener('click', async () => {
         b.disabled = true;
         try { await fn(); } catch (e) { notice.textContent = safeError(e, key); }
         finally { b.disabled = false; }
       }); return b;
     }
-    header.append(button('닫기', async () => { opened = false; apiInput.value = ''; await Risuai.hideContainer(); })); root.append(header);
+    async function closeUI() { if (!opened) return; opened = false; apiInput.value = ''; await Risuai.hideContainer(); }
+    header.append(button('닫기', closeUI)); root.append(header);
+    backdrop.addEventListener('mousedown', event => { if (event.target === backdrop) void closeUI(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape' && opened) void closeUI(); });
     const notice = node('div', '', 'notice'); notice.setAttribute('role', 'status'); notice.setAttribute('aria-live', 'polite'); root.append(notice);
-    const common = node('section'); common.append(node('h2', '공통 API 키')); root.append(common);
-    const keyLabel = node('label', 'OpenRouter API 키 · 모든 프리셋에서 공통 사용');
+    const common = node('section'); common.append(node('h2', 'API 키')); root.append(common);
+    const keyLabel = node('label', 'OpenRouter API 키 (모든 프리셋 공통)');
     const apiInput = node('input'); apiInput.type = 'password'; apiInput.autocomplete = 'new-password'; keyLabel.append(apiInput); common.append(keyLabel);
     const keyActions = node('div', null, 'actions'); common.append(keyActions);
     keyActions.append(button('API 키 저장', async () => {
       const value = apiInput.value.trim(); if (!value) throw Error('저장할 API 키를 입력해.');
       await storage.setItem(PREFIX + 'key', value); key = value; apiInput.value = ''; apiInput.placeholder = '저장된 키 있음 · 변경하려면 입력'; notice.textContent = '공통 API 키를 저장했어.';
     }, true));
-    keyActions.append(button('키 지우기', async () => { await storage.removeItem(PREFIX + 'key'); key = ''; apiInput.value = ''; apiInput.placeholder = 'sk-or-…'; notice.textContent = '이 기기에 저장된 API 키를 지웠어.'; }));
+    keyActions.append(button('키 지우기', async () => { await storage.removeItem(PREFIX + 'key'); key = ''; apiInput.value = ''; apiInput.placeholder = 'sk-or-…'; notice.textContent = '이 기기에 저장된 API 키를 지웠어.'; }, 'danger'));
     const section = node('section'); section.append(node('h2', '모델 프리셋')); root.append(section);
     const presetLabel = node('label', '편집할 프리셋'); const picker = node('select'); presetLabel.append(picker); section.append(presetLabel);
     picker.addEventListener('change', () => { selectedId = picker.value; fill(); });
@@ -599,7 +670,7 @@
       if (!selectedId) return;
       if (!confirm('선택한 프리셋을 삭제할까? 공통 API 키와 작업 기록은 유지돼.')) return;
       await engine.deletePreset(selectedId); selectedId = engine.presets[0].id; fill(); notice.textContent = '삭제했어. Risu를 다시 열면 이전 모델 목록도 정리돼.';
-    }); presetActions.append(removePreset);
+    }, 'danger'); presetActions.append(removePreset);
     const form = node('form'); section.append(form); const inputs = {};
     function field(name, title, type, values) {
       const label = node('label', title), e = node(type === 'select' ? 'select' : 'input');
@@ -612,18 +683,17 @@
     const modelInput = field('model', 'Claude 모델 ID', 'text'); modelInput.placeholder = 'anthropic/claude-…'; modelInput.required = true;
     field('mode', '수신 방식', 'select', [['defer', '접수 → UI 수령 → 재생성'], ['wait', '완료될 때까지 기다리기']]);
     field('provider', '공급자 고정 · 비워두면 자동', 'text').placeholder = '예: anthropic';
-    for (const [name, title, min, max] of [['pollSeconds', '조회 간격 (초)', 10, 600], ['waitMinutes', '한 번에 기다릴 시간 (분)', 1, 1440], ['budget', '고정 사고 예산 (토큰)', 1024, 128000]]) {
+    for (const [name, title, min, max] of [['pollSeconds', '조회 간격 (초)', 10, 600], ['waitMinutes', '한 번에 기다릴 시간 (분)', 1, 1440]]) {
       const e = field(name, title, 'number'); e.min = min; e.max = max; e.step = 1; e.required = true;
     }
-    field('thinking', '사고 모드 · 모델별 지원 확인', 'select', [['off', '사용 안 함'], ['adaptive', 'Adaptive'], ['enabled', '고정 예산']]);
-    field('effort', '사고 강도 · 모델별 지원 확인', 'select', [['', '모델 기본값'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
-    const cacheLabel = node('label', '시스템 프롬프트 캐시 요청', 'check'); const cache = node('input'); cache.type = 'checkbox'; inputs.cache = cache; cacheLabel.append(cache); form.append(cacheLabel);
-    const hint = node('p', '텍스트 전용 · 스트리밍 없음 · 최대 24시간 처리 창. 사고/캐시 지원과 할인율은 모델에 따라 달라. 키·설정·작업·결과는 이 기기의 플러그인 로컬 저장소에 보관돼.', 'hint wide'); form.append(hint);
+    field('thinking', '사고 · 모델별 지원 확인', 'select', [['none', '끄기 (none)'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']]);
+    field('cache', '시스템 프롬프트 캐시 · 모델별 지원 확인', 'select', [['off', '끄기'], ['5m', '5분'], ['1h', '1시간']]);
+    const hint = node('p', '텍스트 전용 · 스트리밍 없음 · 최대 24시간 처리 창. 사고를 켜면(Low~Max) 온도 설정을 보내지 않고 어시스턴트 프리필도 쓸 수 없어. 사고/캐시 지원과 할인율은 모델에 따라 달라. 키·설정·작업·결과는 이 기기의 플러그인 로컬 저장소에 보관돼.', 'hint wide'); form.append(hint);
     // Risu's sandbox can omit allow-forms. Native submit is blocked BEFORE the
     // submit event, even when that handler calls preventDefault. Use a click.
     const actions = node('div', null, 'actions wide'); const save = node('button', '프리셋 저장', 'primary'); save.type = 'button'; actions.append(save); form.append(actions);
     const saveStatus = node('div', '', 'notice wide'); saveStatus.setAttribute('aria-live', 'polite'); form.append(saveStatus);
-    function readForm() { return Object.fromEntries(Object.keys(DEFAULTS).map(k => [k, k === 'cache' ? inputs[k].checked : inputs[k].value])); }
+    function readForm() { return Object.fromEntries(Object.keys(DEFAULTS).map(k => [k, inputs[k].value])); }
     async function savePresetForm() {
       if (save.disabled) return;
       save.disabled = true; saveStatus.textContent = '프리셋을 저장 중이야…';
@@ -674,7 +744,7 @@
       jobs.replaceChildren(node('h2', `작업 목록 · ${engine.jobs.length}`));
       if (!engine.jobs.length) { jobs.append(node('p', '아직 작업이 없어. 설정을 저장하고 Risu에서 메시지를 보내봐.')); return; }
       for (const j of engine.jobs) {
-        const card = node('article'); const heading = node('div'); heading.append(node('span', labels[j.status] || j.status, 'badge'), node('strong', j.context.name)); card.append(heading);
+        const card = node('article'); card.dataset.status = j.status; const heading = node('div', null, 'job-head'); heading.append(node('span', labels[j.status] || j.status, 'badge'), node('strong', j.context.name)); card.append(heading);
         card.append(node('div', `${j.presetName || '기본 프리셋'} · ${j.model} · ${new Date(j.createdAt).toLocaleString()}${j.consumed ? ' · 반환함' : ''}${j.released ? ' · 새 작업 허용됨' : ''}`, 'meta'));
         card.append(node('div', `Batch: ${j.batchId || '미확인'} / 요청: ${j.customId}`, 'meta'));
         if (j.result?.cost != null) card.append(node('div', `보고된 비용: ${j.result.cost}`, 'meta'));
@@ -700,18 +770,18 @@
             notice.textContent = j.manualClaimArmed
               ? '수령 준비 완료! 해당 채팅으로 돌아가 응답 재생성을 눌러줘. 같은 채팅·프리셋·API 키에서만 적용돼.'
               : '결과 선택을 취소했어.';
-          }));
+          }, !j.manualClaimArmed));
         if (!j.released && (TERMINAL.has(j.status) || j.status === 'unknown')) row.append(button('새 작업 허용', async () => {
           if (!confirm(j.status === 'unknown' ? '서버에 이미 접수됐을 수 있어. 다음 요청에서 중복 과금될 수 있어도 새 작업을 허용할까?' : '다음 동일 입력 요청을 새 유료 배치로 접수할 수 있게 할까?')) return;
           await engine.release(j); notice.textContent = '다음 동일 입력 요청부터 새 배치를 만들 수 있어.';
         }));
         if (j.batchId && TERMINAL.has(j.remoteStatus) && !j.remoteDeleted) row.append(button('서버 기록 삭제', async () => {
           if (confirm('이 배치의 서버 입력과 결과를 삭제할까? 로컬 결과는 남아.')) { await engine.deleteRemote(j); renderJobs(); }
-        }));
+        }, 'danger'));
         if (j.remoteDeleted) row.append(node('small', '서버 기록 삭제됨'));
         if (TERMINAL.has(j.status)) row.append(button('로컬 기록 삭제', async () => {
           if (confirm('로컬 결과와 중복 방지 기록을 삭제할까? 서버 기록은 유지돼. 같은 입력을 다시 보내면 새 작업으로 과금될 수 있어.')) await engine.removeLocal(j);
-        }));
+        }, 'danger'));
         if (j.status === 'unknown' || j.status === 'submitting' || (j.status === 'failed' && batchIdFromNotFound(j.error))) {
           const label = node('label', 'OpenRouter에서 확인한 batch ID'); const input = node('input'); input.placeholder = 'batch_… 또는 batch-…'; input.value = attachDrafts.get(j.id) || j.batchId || batchIdFromNotFound(j.error); input.addEventListener('input', () => attachDrafts.set(j.id, input.value)); label.append(input); card.append(label);
           card.append(button('기존 작업 연결', async () => { await engine.attach(j, input.value.trim()); renderJobs(); }));
@@ -726,7 +796,7 @@
       picker.value = selectedId; removePreset.disabled = !selectedId || engine.presets.length < 2;
       const p = selectedId ? engine.preset(selectedId) : {name: '', config: DEFAULTS};
       nameInput.value = p.name;
-      for (const k of Object.keys(DEFAULTS)) { if (k === 'cache') inputs[k].checked = p.config[k]; else inputs[k].value = p.config[k]; }
+      for (const k of Object.keys(DEFAULTS)) inputs[k].value = p.config[k];
     }
     async function openBatchUI(focusJobs = false) {
       if (disposed) return;
@@ -738,6 +808,9 @@
       if (focusJobs) jobs.scrollIntoView?.({block: 'start'});
     }
     const ui = await Risuai.registerSetting('OpenRouter Claude Batch', () => openBatchUI(), '📦', 'html');
+    const hamburgerUI = await Risuai.registerButton({
+      name: 'OpenRouter Claude Batch', icon: '📦', iconType: 'html', location: 'hamburger'
+    }, () => openBatchUI());
     async function tick() {
       if (disposed) return;
       if (!busy) { busy = true; try { await engine.tick(); } finally { busy = false; } }
@@ -747,8 +820,9 @@
     await Risuai.onUnload(async () => {
       disposed = true; clearTimeout(timer); for (const c of waiters) c.abort();
       if (ui?.id) await Risuai.unregisterUIPart(ui.id);
+      if (hamburgerUI?.id) await Risuai.unregisterUIPart(hamburgerUI.id);
       try { await noticeQueue; await dismissFloatingNotice(); } catch { /* optional UI */ }
-      style.remove(); root.remove();
+      style.remove(); backdrop.remove();
     });
   }
   start().catch(error => {
