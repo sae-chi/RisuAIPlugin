@@ -2,6 +2,7 @@
 //@api 3.0
 //@version 0.8.0
 //@display-name 프리셋 에디터
+//@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/preset-editor.js
 
 /* Offline RisuAI preset migration. No database access, network, or model calls. */
 (function () {
