@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.6
+//@version 1.1.7
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -206,20 +206,34 @@
       stopped(signal);
       const {key, keyHash} = await this.credentials();
       const body = buildBody(args, c);
-      const signature = await this.digest(canonical({scope: context.scope, mode: args.mode || '', keyHash,
-        model: c.model, provider: c.provider, body, ...(presetId === 'legacy' ? {} : {presetId})}));
+      // Preserve the legacy signature for saved jobs and add a mode-independent
+      // fingerprint. Regeneration may set args.mode differently from generation.
+      const identity = {scope: context.scope, keyHash,
+        model: c.model, provider: c.provider, body,
+        ...(presetId === 'legacy' ? {} : {presetId})};
+      const signature = await this.digest(canonical({...identity, mode: args.mode || ''}));
+      const contentSignature = await this.digest(canonical(identity));
       const lock = JSON.stringify([context.scope, presetId]);
       if (this.running.has(lock)) throw Error('이 프리셋의 입력을 이미 접수 중이야. 잠시 뒤 다시 확인해.');
       this.running.add(lock);
       try {
         const previous = this.jobs.find(j => j.signature === signature && (j.presetId || 'legacy') === presetId && !j.released);
         if (previous) return previous;
+        // Match new jobs even if only args.mode changes between send and regenerate.
+        const sameContent = this.jobs.find(j => j.contentSignature === contentSignature && j.keyHash === keyHash &&
+          j.context.scope === context.scope && (j.presetId || 'legacy') === presetId && !j.released);
+        if (sameContent) return sameContent;
+        // Legacy saved jobs and changed prompts require explicit user selection.
+        const chosen = this.jobs.find(j => j.manualClaimArmed === true && j.result && !j.consumed &&
+          !j.released && j.keyHash === keyHash && j.context.scope === context.scope &&
+          (j.presetId || 'legacy') === presetId);
+        if (chosen) return chosen;
         const outstanding = this.jobs.find(j => j.context.scope === context.scope && (j.presetId || 'legacy') === presetId && !j.released &&
           (ACTIVE.has(j.status) || ['unknown', 'submitting'].includes(j.status) || (j.result && !j.consumed)));
-        if (outstanding) throw Error('이 채팅·프리셋에 처리 중이거나 아직 받지 않은 배치가 있어. 입력·모델·설정이 달라져서 자동으로 연결하지 않았어. 작업 목록에서 기존 결과를 확인해. 새 배치는 만들지 않았어.');
+        if (outstanding) throw Error('이 채팅·프리셋에 처리 중이거나 미수령 배치가 있어. 재생성 입력이 기존 요청과 달라 자동 연결하지 않았어. 완료된 작업은 설정 → OpenRouter Claude Batch → 「다음 재생성에서 이 결과 받기」로 직접 선택할 수 있어. 새 배치는 만들지 않았어.');
         stopped(signal);
         const id = this.uuid();
-        const j = {id, customId: `orcb-${id}`, signature, keyHash, batchId: '', model: c.model,
+        const j = {id, customId: `orcb-${id}`, signature, contentSignature, keyHash, batchId: '', model: c.model,
           presetId, presetName: this.preset(presetId).name, pollSeconds: c.pollSeconds, responseMode: c.mode,
           context: copy(context), status: 'submitting', remoteStatus: '', createdAt: this.now(), updatedAt: this.now(),
           consumed: false, released: false, remoteDeleted: false, error: '', result: null};
@@ -309,6 +323,17 @@
         j.lookupNotice = ''; j.lastError = safeError(e, key); await this.persist(); throw e;
       }
     }
+    async setManualClaim(j, enabled) {
+      if (enabled && (!j.result || j.consumed || j.released))
+        throw Error('수령하지 않은 완료 결과만 선택할 수 있어.');
+      if (enabled) await this.credentials(j);
+      const affected = this.jobs.filter(x => x.context.scope === j.context.scope &&
+        (x.presetId || 'legacy') === (j.presetId || 'legacy'));
+      const states = affected.map(x => [x, x.manualClaimArmed]);
+      for (const x of affected) x.manualClaimArmed = enabled && x.id === j.id;
+      try { await this.persist(); }
+      catch (e) { for (const [x, old] of states) x.manualClaimArmed = old; throw e; }
+    }
     async claim(j, context, signal) {
       stopped(signal);
       if (j.context.scope !== context.scope) throw Error('채팅이 바뀌었어. 원래 채팅에서 다시 요청해.');
@@ -316,8 +341,9 @@
       if (!j.result) throw Error('아직 결과가 없어.');
       this.claiming.add(j.id);
       try {
-        j.consumed = true; j.consumedAt = this.now();
-        try { await this.persist(); } catch (e) { j.consumed = false; throw e; }
+        const prior = {consumed: j.consumed, consumedAt: j.consumedAt, manualClaimArmed: j.manualClaimArmed};
+        j.consumed = true; j.consumedAt = this.now(); j.manualClaimArmed = false;
+        try { await this.persist(); } catch (e) { Object.assign(j, prior); throw e; }
         return {success: true, content: j.result.text};
       } finally { this.claiming.delete(j.id); }
     }
@@ -587,7 +613,8 @@
         const card = node('article'); const heading = node('div'); heading.append(node('span', labels[j.status] || j.status, 'badge'), node('strong', j.context.name)); card.append(heading);
         card.append(node('div', `${j.presetName || '기본 프리셋'} · ${j.model} · ${new Date(j.createdAt).toLocaleString()}${j.consumed ? ' · 반환함' : ''}${j.released ? ' · 새 작업 허용됨' : ''}`, 'meta'));
         card.append(node('div', `Batch: ${j.batchId || '미확인'} / 요청: ${j.customId}`, 'meta'));
-        if (j.result?.cost != null) card.append(node('div', `보고된 비용: $${j.result.cost}`, 'meta'));
+        if (j.result?.cost != null) card.append(node('div', `보고된 비용: ${j.result.cost}`, 'meta'));
+        if (j.manualClaimArmed && j.result && !j.consumed) card.append(node('p', '이 작업의 결과를 다음 재생성에서 수령하도록 선택했어. 원래 채팅에서 재생성해.', 'notice'));
         if (j.error || j.lastError) card.append(node('p', j.error || j.lastError, 'error'));
         if (j.lookupNotice) card.append(node('p', j.lookupNotice, 'notice'));
         if (j.result) {
@@ -596,7 +623,20 @@
         }
         const row = node('div', null, 'actions'); card.append(row);
         if (j.batchId && !j.result && !j.remoteDeleted) row.append(button('조회', async () => { await engine.refresh(j); renderJobs(); }));
-        if (j.result && j.consumed && !j.released) row.append(button('같은 결과 다시 받기', async () => { j.consumed = false; await engine.persist(); notice.textContent = '원래 채팅에서 같은 입력으로 재요청하면 이 결과를 다시 받아.'; }));
+        if (j.result && j.consumed && !j.released) row.append(button('같은 결과 다시 받기', async () => {
+          j.consumed = false; j.manualClaimArmed = false; await engine.persist();
+          notice.textContent = '이 결과를 다시 수령할 수 있게 됐어. 원래 채팅에서 재생성하거나 아래 버튼으로 결과를 지정해.';
+        }));
+        if (j.result && !j.consumed && !j.released) row.append(button(
+          j.manualClaimArmed ? '선택 취소' : '다음 재생성에서 이 결과 받기', async () => {
+            if (!j.manualClaimArmed && !confirm(
+              `선택한 배치 결과를 다음 재생성에서 채팅으로 반환할까?\n\n채팅: ${j.context.name}\n모델: ${j.model}\n배치: ${j.batchId}\n\n실제 재생성 프롬프트가 달라도 이 결과를 사용해. 원래 채팅에서만 적용되며 새 API 요청은 보내지 않아.`)) return;
+            await engine.setManualClaim(j, !j.manualClaimArmed);
+            renderJobs();
+            notice.textContent = j.manualClaimArmed
+              ? '수령할 결과를 선택했어. 해당 채팅으로 돌아가 응답 재생성을 눌러줘. 같은 채팅·프리셋·API 키에서만 적용돼.'
+              : '결과 선택을 취소했어.';
+          }));
         if (!j.released && (TERMINAL.has(j.status) || j.status === 'unknown')) row.append(button('새 작업 허용', async () => {
           if (!confirm(j.status === 'unknown' ? '서버에 이미 접수됐을 수 있어. 다음 요청에서 중복 과금될 수 있어도 새 작업을 허용할까?' : '다음 동일 입력 요청을 새 유료 배치로 접수할 수 있게 할까?')) return;
           await engine.release(j); notice.textContent = '다음 동일 입력 요청부터 새 배치를 만들 수 있어.';
