@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.7
+//@version 1.1.8
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -487,7 +487,7 @@
       try { return await engine.provide(args, await context(), controller.signal, context, id); }
       catch (e) { return fail(safeError(e, key)); }
       finally { waiters.delete(controller); signal?.removeEventListener('abort', cancel); }
-    }, {tokenizer: 'claude'});
+    }, {tokenizer: 'claude', model: {tokenizer: 6}});
         registered.set(title, id);
       }
     }
