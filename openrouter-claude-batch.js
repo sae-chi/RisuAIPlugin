@@ -1,7 +1,7 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.9
+//@version 1.1.10
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
@@ -463,14 +463,34 @@
         await detail.setTextContent(`${messages[payload.kind] || ''}\n채팅: ${payload.chatName || '원래 채팅'}\n배치 ID: ${payload.batchId || '확인 중'}`);
         await detail.setStyleAttribute('white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:12px');
         await banner.appendChild(detail);
+        const actions = await rootDoc.createElement('div');
+        await actions.setStyleAttribute('display:flex;gap:8px;flex-wrap:wrap;align-items:center');
+        if (payload.kind === 'completed' || payload.kind === 'claim_required') {
+          const open = await rootDoc.createElement('button');
+          await open.setTextContent('플러그인 UI 열기');
+          await open.setStyleAttribute('background:#405eaa;color:#fff;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
+          await open.addEventListener('click', async () => {
+            try {
+              // Same initialization as opening the plugin from Risu's settings.
+              await openBatchUI(true);
+              try { await banner.remove(); } catch { /* best effort */ }
+              if (floatingNotice === banner) floatingNotice = null;
+            } catch (e) {
+              console.warn('[OpenRouter Claude Batch] UI 바로 열기 실패', safeError(e));
+              await detail.setTextContent(`${messages[payload.kind] || ''}\n플러그인 UI를 열지 못했어. Risu 설정에서 OpenRouter Claude Batch를 직접 열어줘.\n채팅: ${payload.chatName || '원래 채팅'}\n배치 ID: ${payload.batchId || '확인 중'}`);
+            }
+          });
+          await actions.appendChild(open);
+        }
         const close = await rootDoc.createElement('button');
         await close.setTextContent('확인 · 닫기');
-        await close.setStyleAttribute('background:#405eaa;color:#fff;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
+        await close.setStyleAttribute('background:#334155;color:#fff;border:1px solid #64748b;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
         await close.addEventListener('click', async () => {
           try { await banner.remove(); } catch { /* best effort */ }
           if (floatingNotice === banner) floatingNotice = null;
         });
-        await banner.appendChild(close);
+        await actions.appendChild(close);
+        await banner.appendChild(actions);
         await body.appendChild(banner);
         floatingNotice = banner;
       }).catch(e => { console.warn('[OpenRouter Claude Batch] 별도 안내 패널 표시 실패', safeError(e)); });
@@ -682,9 +702,16 @@
       nameInput.value = p.name;
       for (const k of Object.keys(DEFAULTS)) { if (k === 'cache') inputs[k].checked = p.config[k]; else inputs[k].value = p.config[k]; }
     }
-    const ui = await Risuai.registerSetting('OpenRouter Claude Batch', async () => {
-      opened = true; fill(); apiInput.placeholder = key ? '저장된 키 있음 · 변경하려면 입력' : 'sk-or-…'; renderJobs(); await Risuai.showContainer('fullscreen');
-    }, '📦', 'html');
+    async function openBatchUI(focusJobs = false) {
+      if (disposed) return;
+      opened = true;
+      fill();
+      apiInput.placeholder = key ? '저장된 키 있음 · 변경하려면 입력' : 'sk-or-…';
+      renderJobs();
+      await Risuai.showContainer('fullscreen');
+      if (focusJobs) jobs.scrollIntoView?.({block: 'start'});
+    }
+    const ui = await Risuai.registerSetting('OpenRouter Claude Batch', () => openBatchUI(), '📦', 'html');
     async function tick() {
       if (disposed) return;
       if (!busy) { busy = true; try { await engine.tick(); } finally { busy = false; } }
