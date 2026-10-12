@@ -1,13 +1,17 @@
 //@name openrouter-claude-batch
 //@display-name OpenRouter Claude Batch
 //@api 3.0
-//@version 1.1.2
+//@version 1.1.6
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/openrouter-claude-batch.js
 
 (() => {
   'use strict';
   const BASE = 'https://openrouter.ai/api/v1/batches';
   const PREFIX = 'openrouter-claude-batch:v1:';
+  // Recovery helper: a POST 404 can contain an ID allocated inside OpenRouter.
+  // Treat it only as a candidate, never as proof of a successful submission.
+  const batchIdFromNotFound = message => /Batch job\s+(batch[-_][a-zA-Z0-9_-]+)\s+not found/i.exec(String(message || ''))?.[1] || '';
+
   const TERMINAL = new Set(['completed', 'failed', 'expired', 'cancelled']);
   const ACTIVE = new Set(['validating', 'in_progress', 'finalizing', 'cancelling']);
   const DEFAULTS = Object.freeze({model: '', mode: 'defer', pollSeconds: 30,
@@ -65,7 +69,7 @@
     if (!messages.length) throw Error('사용자 또는 어시스턴트 메시지가 필요해.');
     if (messages[0].role !== 'user') messages.unshift({role: 'user', content: [{type: 'text', text: 'Continue the conversation.'}]});
     const max = Number(args.max_tokens);
-    if (!Number.isInteger(max) || max < 1) throw Error('리수의 최대 응답 토큰을 1 이상으로 설정해.');
+    if (!Number.isInteger(max) || max < 1) throw Error('Risu의 최대 응답 토큰을 1 이상으로 설정해.');
     const body = {max_tokens: max, messages};
     if (system.length) {
       if (c.cache) system.at(-1).cache_control = {type: 'ephemeral'};
@@ -113,10 +117,18 @@
     });
   }
   class Engine {
-    constructor({storage, fetcher, getKey, now = Date.now, digest = hash, uuid = () => crypto.randomUUID(), changed = () => {}}) {
-      Object.assign(this, {storage, fetcher, getKey, now, digest, uuid, changed});
+    constructor({storage, fetcher, getKey, now = Date.now, digest = hash, uuid = () => crypto.randomUUID(), changed = () => {}, onNotice = () => {}}) {
+      Object.assign(this, {storage, fetcher, getKey, now, digest, uuid, changed, onNotice});
       this.jobs = []; this.presets = [{id: 'legacy', name: '기본 프리셋', config: {...DEFAULTS}}]; this.serial = Promise.resolve();
       this.running = new Set(); this.refreshing = new Map(); this.claiming = new Set();
+    }
+    // Notices are best-effort UI only. A UI failure must never affect the
+    // billing, submission, retrieval, or single-claim state machine.
+    announce(payload) {
+      try {
+        const response = this.onNotice(payload);
+        if (response?.catch) response.catch(() => {});
+      } catch { /* Never modify a job's outcome because a notice failed. */ }
     }
     async init() {
       const raw = await this.storage.getItem(PREFIX + 'state');
@@ -140,7 +152,7 @@
     set settings(value) { this.presets[0].config = value; }
     preset(id) {
       const p = this.presets.find(p => p.id === id);
-      if (!p) throw Error('삭제된 프리셋이야. 리수 모델 목록에서 다른 프리셋을 선택해.');
+      if (!p) throw Error('삭제된 프리셋이야. Risu 모델 목록에서 다른 프리셋을 선택해.');
       return p;
     }
     persist() {
@@ -182,7 +194,7 @@
         const r = await this.fetcher(BASE + path, {method, headers: {'Content-Type': 'application/json', Authorization: `Bearer ${key}`},
           ...(body ? {body: JSON.stringify(body)} : {}), signal: control.signal});
         if (!r.ok) {
-          const error = Error(`OpenRouter HTTP ${r.status}: ${safeError(await r.text(), key)}`);
+          const error = Error(`OpenRouter ${method} /api/v1/batches${path} HTTP ${r.status}: ${safeError(await r.text(), key)}`);
           error.status = r.status; throw error;
         }
         return await r.json();
@@ -208,7 +220,7 @@
         stopped(signal);
         const id = this.uuid();
         const j = {id, customId: `orcb-${id}`, signature, keyHash, batchId: '', model: c.model,
-          presetId, presetName: this.preset(presetId).name, pollSeconds: c.pollSeconds,
+          presetId, presetName: this.preset(presetId).name, pollSeconds: c.pollSeconds, responseMode: c.mode,
           context: copy(context), status: 'submitting', remoteStatus: '', createdAt: this.now(), updatedAt: this.now(),
           consumed: false, released: false, remoteDeleted: false, error: '', result: null};
         this.jobs.unshift(j);
@@ -219,11 +231,32 @@
           if (typeof b.id !== 'string' || !b.id) throw Error('접수 응답에 batch ID가 없어.');
           j.batchId = b.id; j.status = ACTIVE.has(b.status) || TERMINAL.has(b.status) ? b.status : 'validating';
           j.remoteStatus = j.status;
+          // Acceptance and availability for GET need not be simultaneous.
+          // Delay the first automatic lookup rather than immediately querying POST's ID.
+          j.acceptedAt = this.now(); j.nextPollAt = j.acceptedAt + c.pollSeconds * 1000;
         } catch (e) {
-          j.status = [400, 401, 402, 403, 404, 413, 422, 429].includes(e.status) ? 'failed' : 'unknown';
-          j.error = safeError(e, key);
+          const candidate = e.status === 404 ? batchIdFromNotFound(e.message) : '';
+          if (candidate) {
+            // 404 occurred during POST but the response references an allocated
+            // batch ID. Preserve it, poll GET only, NEVER automatically POST again.
+            j.batchId = candidate;
+            j.status = 'unknown';
+            j.remoteStatus = '';
+            j.nextPollAt = this.now() + c.pollSeconds * 1000;
+            j.lastError = `POST가 404로 끝났지만 서버 오류에 배치 ID ${candidate}가 들어 있어 보존했어. 접수 성공은 미확인이야. 같은 ID를 조회만 재시도하고, 새 POST는 자동 실행하지 않아.\n${safeError(e, key)}`;
+            j.error = '';
+          } else {
+            j.status = [400, 401, 402, 403, 404, 413, 422, 429].includes(e.status) ? 'failed' : 'unknown';
+            j.error = safeError(e, key);
+          }
         }
-        j.updatedAt = this.now(); await this.persist(); return j;
+        j.updatedAt = this.now(); await this.persist();
+        if (c.mode === 'defer' && j.batchId) {
+          // Show a separate, non-chat notice only for a NEW submission.
+          this.announce({kind: j.status === 'unknown' ? 'uncertain' : j.status === 'failed' ? 'failed' : 'submitted',
+            batchId: j.batchId, chatName: context.name, error: j.status === 'unknown' ? j.lastError : ''});
+        }
+        return j;
       } finally { this.running.delete(lock); }
     }
     async refresh(j) {
@@ -239,6 +272,8 @@
         if (b.id !== j.batchId) throw Error('조회한 batch ID가 일치하지 않아.');
         if (!ACTIVE.has(b.status) && !TERMINAL.has(b.status)) throw Error(`알 수 없는 작업 상태: ${b.status}`);
         j.remoteStatus = b.status; j.status = b.status; j.error = ''; j.lastError = '';
+        j.lookupNotice = ''; j.lookupFailures = 0; delete j.firstNotFoundAt;
+        j.nextPollAt = this.now() + (j.pollSeconds || 30) * 1000;
         if (TERMINAL.has(b.status)) {
           // Individual results are authoritative, even for partially cancelled/expired batches.
           const item = b.results?.find(r => r.custom_id === j.customId);
@@ -247,9 +282,31 @@
             catch (e) { j.status = 'failed'; j.error = safeError(e, key); }
           } else j.error = safeError(b.error || `작업 ${b.status}`, key);
         }
-        j.updatedAt = this.now(); await this.persist(); return j;
+        j.updatedAt = this.now(); await this.persist();
+        if (j.result && j.responseMode !== 'wait') {
+          this.announce({kind: 'completed', batchId: j.batchId, chatName: j.context.name});
+        }
+        return j;
       } catch (e) {
-        j.lastError = safeError(e, key); j.updatedAt = this.now(); await this.persist(); throw e;
+        j.updatedAt = this.now();
+        j.nextPollAt = j.updatedAt + (j.pollSeconds || 30) * 1000;
+        if (e.status === 404) {
+          // GET after a successful POST or after recovering an ID mentioned in
+          // a POST 404: retry only GET, never create/delete an upstream batch.
+          j.firstNotFoundAt ??= j.updatedAt;
+          j.lookupFailures = (j.lookupFailures || 0) + 1;
+          const delay = Math.max((j.pollSeconds || 30) * 1000, Math.min(120000, 10000 * 2 ** Math.min(j.lookupFailures - 1, 4)));
+          j.nextPollAt = j.updatedAt + delay;
+          if (j.updatedAt - j.firstNotFoundAt < 300000) {
+            j.lastError = '';
+            j.lookupNotice = `조회 대기 · 서버가 아직 이 작업을 찾지 못했어(404). 일시적인 반영 지연일 수 있어. 약 ${Math.ceil(delay / 1000)}초 뒤 같은 ID로 조회만 재시도해. 새 배치는 만들지 않아.`;
+            await this.persist(); return j;
+          }
+          j.lookupNotice = '';
+          j.lastError = `같은 배치 ID의 조회가 5분 이상 404로 응답했어. 단순 반영 지연으로 단정할 수 없어. OpenRouter의 배치 기록과 작업 ID를 확인해. 기존 작업은 유지하고 자동 재접수하지 않아.\n${safeError(e, key)}`;
+          await this.persist(); throw Error(j.lastError);
+        }
+        j.lookupNotice = ''; j.lastError = safeError(e, key); await this.persist(); throw e;
       }
     }
     async claim(j, context, signal) {
@@ -272,22 +329,23 @@
         for (;;) {
           stopped(signal);
           if ((await currentContext()).scope !== context.scope) throw Error('채팅이 바뀌어서 대기를 끝냈어. 원래 채팅에서 이어서 확인해.');
-          if (j.status === 'unknown' || j.status === 'submitting') throw Error(`접수 여부가 불명확해. 중복 제출을 막았어. 작업 목록에서 batch ID를 연결해.\n요청 ID: ${j.customId}`);
+          if (j.status === 'submitting' || (j.status === 'unknown' && !j.batchId)) throw Error(`접수 여부가 불명확해. 중복 제출을 막았어. 작업 목록에서 batch ID를 연결해.\n요청 ID: ${j.customId}`);
           if (j.consumed) throw Error('이미 반환한 결과야. 작업 목록에서 결과 확인 또는 새 작업 허용을 선택해.');
-          if (j.batchId && !j.result && (!TERMINAL.has(j.status) || !j.checkedTerminal)) {
+          if (j.batchId && !j.result && this.now() >= (j.nextPollAt || 0) && (!TERMINAL.has(j.status) || !j.checkedTerminal)) {
             await this.refresh(j); if (TERMINAL.has(j.status)) j.checkedTerminal = true;
           }
           stopped(signal);
           if (j.result) return await this.claim(j, await currentContext(), signal);
           if (TERMINAL.has(j.status)) throw Error(j.error || `작업 ${j.status}`);
-          if (c.mode === 'defer') return fail(`배치 접수 완료 · ${j.batchId}\n완료 후 같은 입력으로 재요청하면 결과를 받아. 새 작업은 중복 생성하지 않아.\n설정 → OpenRouter Claude Batch에서 진행 상황을 확인해.`);
+          if (c.mode === 'defer') return fail(`${j.status === 'unknown' ? 'OpenRouter 배치 접수 확인 중' : 'OpenRouter 배치 접수 안내'}\n배치 ID: ${j.batchId}\n${j.lookupNotice || j.lastError || '정상적으로 접수됐어. 완료 후 원래 채팅에서 응답 재생성을 누르면 저장된 결과를 받을 수 있어.'}\n이 메시지는 Claude 응답이 아니야. 새 사용자 메시지를 보내거나 새 작업 허용을 누르지 마.\n설정 → OpenRouter Claude Batch에서도 확인할 수 있어.`);
           if (this.now() >= deadline) return fail('대기 시간이 끝났어. 서버 작업은 유지돼. 같은 입력으로 다시 요청해.');
-          await sleep(c.pollSeconds * 1000, signal);
+          await sleep(Math.min(Math.max(1000, (j.nextPollAt || this.now() + c.pollSeconds * 1000) - this.now()), deadline - this.now()), signal);
         }
       } catch (e) { return fail(safeError(e)); }
     }
     async attach(j, batchId) {
-      if (!['unknown', 'submitting'].includes(j.status)) throw Error('접수 확인이 필요한 작업만 연결할 수 있어.');
+      if (!['unknown', 'submitting'].includes(j.status) && !(j.status === 'failed' && batchIdFromNotFound(j.error)))
+        throw Error('POST 404에서 ID가 확인된 작업 또는 접수 불명확 작업만 연결할 수 있어.');
       if (!/^[a-zA-Z0-9_-]+$/.test(batchId)) throw Error('올바른 batch ID를 입력해.');
       const {key} = await this.credentials(j);
       const b = await this.api('/' + encodeURIComponent(batchId), 'GET', key);
@@ -317,7 +375,7 @@
     }
     async tick() {
       for (const j of this.jobs) {
-        if (j.batchId && !j.remoteDeleted && !j.result && ACTIVE.has(j.status) && this.now() - j.updatedAt >= (j.pollSeconds || 30) * 1000) {
+        if (j.batchId && !j.remoteDeleted && !j.result && (ACTIVE.has(j.status) || j.status === 'unknown') && this.now() >= (j.nextPollAt || j.updatedAt + (j.pollSeconds || 30) * 1000)) {
           try { await this.refresh(j); } catch { /* Manual refresh exposes the saved error. */ }
         }
       }
@@ -334,8 +392,48 @@
     let key = String(await storage.getItem(PREFIX + 'key') || '');
     let opened = false, disposed = false, timer, busy = false;
     const waiters = new Set();
+    let floatingNotice = null;
+    let noticeQueue = Promise.resolve();
+    // The plugin iframe is hidden during chatting. Draw in RisuAI's main DOM
+    // using the documented SafeDocument API, not in the hidden settings iframe.
+    function showChatNotice(payload) {
+      noticeQueue = noticeQueue.catch(() => {}).then(async () => {
+        if (disposed) return;
+        const rootDoc = await Risuai.getRootDocument();
+        const body = await rootDoc.querySelector('body');
+        if (!body) return;
+        if (floatingNotice) { await floatingNotice.remove(); floatingNotice = null; }
+        const banner = await rootDoc.createElement('div');
+        await banner.setStyleAttribute('position:fixed;top:16px;right:16px;z-index:9999;width:360px;max-width:calc(100vw - 32px);background:#172235;color:#f5f7fc;border:1px solid #8195c9;border-radius:12px;padding:16px;box-shadow:0 10px 32px rgba(0,0,0,.36);font:14px/1.6 system-ui,sans-serif;overflow-wrap:anywhere');
+        const heading = await rootDoc.createElement('div');
+        const titles = {submitted:'📦 OpenRouter 배치 접수 완료', uncertain:'⚠️ 배치 접수 여부 확인 중', completed:'✅ Claude 배치 결과 준비 완료'};
+        await heading.setTextContent(titles[payload.kind] || 'OpenRouter Claude Batch');
+        await heading.setStyleAttribute('font-weight:700;font-size:16px;margin-bottom:8px');
+        await banner.appendChild(heading);
+        const detail = await rootDoc.createElement('div');
+        const messages = {
+          submitted: '배치 작업을 접수했어. 완료 후 원래 채팅에서 같은 입력의 응답을 재생성하면 결과를 받을 수 있어. 새 메시지를 보내지 마.',
+          uncertain: 'OpenRouter가 배치 ID를 언급했지만 접수 성공을 확인하지 못했어. 같은 ID로 조회만 재시도 중이야. 중복 제출을 피하려면 새 작업을 만들지 마.',
+          completed: '배치 결과가 저장됐어! 원래 채팅으로 돌아가 응답 재생성(Regenerate)을 누르면 채팅에 답변이 나타나.'
+        };
+        await detail.setTextContent(`${messages[payload.kind] || ''}\n채팅: ${payload.chatName || '원래 채팅'}\n배치 ID: ${payload.batchId || '확인 중'}`);
+        await detail.setStyleAttribute('white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:12px');
+        await banner.appendChild(detail);
+        const close = await rootDoc.createElement('button');
+        await close.setTextContent('확인 · 닫기');
+        await close.setStyleAttribute('background:#405eaa;color:#fff;border:0;border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit');
+        await close.addEventListener('click', async () => {
+          try { await banner.remove(); } catch { /* best effort */ }
+          if (floatingNotice === banner) floatingNotice = null;
+        });
+        await banner.appendChild(close);
+        await body.appendChild(banner);
+        floatingNotice = banner;
+      }).catch(e => { console.warn('[OpenRouter Claude Batch] 별도 안내 패널 표시 실패', safeError(e)); });
+      return noticeQueue;
+    }
     const engine = await new Engine({storage, fetcher: (...a) => Risuai.nativeFetch(...a), getKey: async () => key,
-      changed: () => { if (opened) renderJobs(); }}).init();
+      changed: () => { if (opened) renderJobs(); }, onNotice: showChatNotice}).init();
     async function context() {
       const ci = await Risuai.getCurrentCharacterIndex();
       const hi = await Risuai.getCurrentChatIndex();
@@ -354,7 +452,7 @@
         if (registered.get(title) === id) continue;
         await Risuai.addProvider(title, async (args, signal) => {
       const selected = engine.presets.find(p => p.id === id);
-      if (!selected || providerTitle(selected) !== title) return fail('삭제되거나 이름이 바뀐 프리셋이야. 새 프리셋을 선택해. 이전 목록은 리수를 다시 열면 정리돼.');
+      if (!selected || providerTitle(selected) !== title) return fail('삭제되거나 이름이 바뀐 프리셋이야. 새 프리셋을 선택해. 이전 목록은 Risu를 다시 열면 정리돼.');
       const controller = new AbortController();
       const cancel = () => controller.abort();
       signal?.addEventListener('abort', cancel, {once: true});
@@ -363,7 +461,7 @@
       try { return await engine.provide(args, await context(), controller.signal, context, id); }
       catch (e) { return fail(safeError(e, key)); }
       finally { waiters.delete(controller); signal?.removeEventListener('abort', cancel); }
-    }, {tokenizer: 'gpt-4'});
+    }, {tokenizer: 'claude'});
         registered.set(title, id);
       }
     }
@@ -386,7 +484,6 @@
       }); return b;
     }
     header.append(button('닫기', async () => { opened = false; apiInput.value = ''; await Risuai.hideContainer(); })); root.append(header);
-    root.append(node('p', '채팅 한 번을 배치 작업 하나로 접수해. 완료 후 같은 입력으로 다시 요청하면 답변을 받아.'));
     const notice = node('div', '', 'notice'); notice.setAttribute('role', 'status'); notice.setAttribute('aria-live', 'polite'); root.append(notice);
     const common = node('section'); common.append(node('h2', '공통 API 키')); root.append(common);
     const keyLabel = node('label', 'OpenRouter API 키 · 모든 프리셋에서 공통 사용');
@@ -400,7 +497,7 @@
     const section = node('section'); section.append(node('h2', '모델 프리셋')); root.append(section);
     const presetLabel = node('label', '편집할 프리셋'); const picker = node('select'); presetLabel.append(picker); section.append(presetLabel);
     picker.addEventListener('change', () => { selectedId = picker.value; fill(); });
-    section.append(node('p', '아래 설정은 프리셋마다 따로 저장돼. 실제 요청에는 리수 모델 목록에서 선택한 프리셋이 적용돼.', 'hint'));
+    section.append(node('p', '아래 설정은 프리셋마다 따로 저장돼. 실제 요청에는 Risu 모델 목록에서 선택한 프리셋이 적용돼.', 'hint'));
     const presetActions = node('div', null, 'actions'); section.append(presetActions);
     presetActions.append(button('새 프리셋', async () => { selectedId = ''; fill(); notice.textContent = '이름과 모델을 입력하고 프리셋 저장을 눌러줘.'; }));
     presetActions.append(button('프리셋 복제', async () => {
@@ -411,7 +508,7 @@
     const removePreset = button('프리셋 삭제', async () => {
       if (!selectedId) return;
       if (!confirm('선택한 프리셋을 삭제할까? 공통 API 키와 작업 기록은 유지돼.')) return;
-      await engine.deletePreset(selectedId); selectedId = engine.presets[0].id; fill(); notice.textContent = '삭제했어. 리수를 다시 열면 이전 모델 목록도 정리돼.';
+      await engine.deletePreset(selectedId); selectedId = engine.presets[0].id; fill(); notice.textContent = '삭제했어. Risu를 다시 열면 이전 모델 목록도 정리돼.';
     }); presetActions.append(removePreset);
     const form = node('form'); section.append(form); const inputs = {};
     function field(name, title, type, values) {
@@ -444,8 +541,8 @@
         const p = await engine.savePreset(selectedId, nameInput.value, readForm()); selectedId = p.id;
         fill();
         try { await registerPresets(); }
-        catch (e) { throw Error(`프리셋은 저장됐지만 모델 등록에 실패했어. 리수를 다시 열어줘. ${safeError(e, key)}`); }
-        notice.textContent = saveStatus.textContent = `저장했어. 리수 모델에서 ${providerTitle(p)}를 선택해.`;
+        catch (e) { throw Error(`프리셋은 저장됐지만 모델 등록에 실패했어. Risu를 다시 열어줘. ${safeError(e, key)}`); }
+        notice.textContent = saveStatus.textContent = `저장했어. Risu 모델에서 ${providerTitle(p)}를 선택해.`;
       } catch (e) {
         notice.textContent = saveStatus.textContent = safeError(e, key);
       } finally { save.disabled = false; }
@@ -465,7 +562,18 @@
       }
       renderJobs(); notice.textContent = errors.length ? errors.join('\n') : '작업 상태를 갱신했어.';
     }));
-    toolbar.append(button('현재 대기 중지', async () => { for (const c of waiters) c.abort(); notice.textContent = '리수의 대기만 중지했어. 서버에 접수된 작업은 계속 진행돼.'; }));
+    toolbar.append(button('서버 배치 목록 대조', async () => {
+      const {key} = await engine.credentials();
+      const remote = await engine.api('?limit=100', 'GET', key);
+      if (!Array.isArray(remote.data)) throw Error('서버 목록 응답에 data 배열이 없어.');
+      const found = new Map(remote.data.map(x => [x.id, x]));
+      const summary = engine.jobs.filter(j => j.batchId).map(j =>
+        `${j.batchId}: ${found.has(j.batchId) ? '서버 목록에 있음 (' + found.get(j.batchId).status + ')' : '최근 100개 목록에는 없음'}`);
+      notice.textContent = [`현재 API 키의 작업 공간 배치 목록: ${remote.data.length}개 확인`,
+        ...summary, remote.has_more ? '이전 페이지에도 작업이 있을 수 있어.' : '',
+        '목록에 있는 ID가 개별 GET에서 계속 404라면 OpenRouter에 문의해.'].filter(Boolean).join('\n');
+    }));
+    toolbar.append(button('현재 대기 중지', async () => { for (const c of waiters) c.abort(); notice.textContent = 'Risu의 대기만 중지했어. 서버에 접수된 작업은 계속 진행돼.'; }));
     toolbar.append(button('로컬 저장 재시도', async () => { await engine.persist(); notice.textContent = '작업 기록을 저장했어.'; }));
     const jobs = node('div'); jobs.id = 'jobs'; root.append(jobs);
     const attachDrafts = new Map();
@@ -474,13 +582,14 @@
       if (!jobs) return;
       const expanded = new Set(Array.from(jobs.querySelectorAll('details[open]')).map(d => d.dataset.identity));
       jobs.replaceChildren(node('h2', `작업 목록 · ${engine.jobs.length}`));
-      if (!engine.jobs.length) { jobs.append(node('p', '아직 작업이 없어. 설정을 저장하고 리수에서 메시지를 보내봐.')); return; }
+      if (!engine.jobs.length) { jobs.append(node('p', '아직 작업이 없어. 설정을 저장하고 Risu에서 메시지를 보내봐.')); return; }
       for (const j of engine.jobs) {
         const card = node('article'); const heading = node('div'); heading.append(node('span', labels[j.status] || j.status, 'badge'), node('strong', j.context.name)); card.append(heading);
         card.append(node('div', `${j.presetName || '기본 프리셋'} · ${j.model} · ${new Date(j.createdAt).toLocaleString()}${j.consumed ? ' · 반환함' : ''}${j.released ? ' · 새 작업 허용됨' : ''}`, 'meta'));
         card.append(node('div', `Batch: ${j.batchId || '미확인'} / 요청: ${j.customId}`, 'meta'));
         if (j.result?.cost != null) card.append(node('div', `보고된 비용: $${j.result.cost}`, 'meta'));
         if (j.error || j.lastError) card.append(node('p', j.error || j.lastError, 'error'));
+        if (j.lookupNotice) card.append(node('p', j.lookupNotice, 'notice'));
         if (j.result) {
           const details = node('details'); details.dataset.identity = j.id + ':text'; details.open = expanded.has(details.dataset.identity); details.append(node('summary', j.result.stopReason === 'max_tokens' ? '결과 확인 · 토큰 한도로 잘림' : '결과 확인'), node('pre', j.result.text)); card.append(details);
           if (j.result.thinking) { const d = node('details'); d.dataset.identity = j.id + ':thinking'; d.open = expanded.has(d.dataset.identity); d.append(node('summary', '사고 과정'), node('pre', j.result.thinking)); card.append(d); }
@@ -499,8 +608,8 @@
         if (TERMINAL.has(j.status)) row.append(button('로컬 기록 삭제', async () => {
           if (confirm('로컬 결과와 중복 방지 기록을 삭제할까? 서버 기록은 유지돼. 같은 입력을 다시 보내면 새 작업으로 과금될 수 있어.')) await engine.removeLocal(j);
         }));
-        if (j.status === 'unknown' || j.status === 'submitting') {
-          const label = node('label', 'OpenRouter에서 확인한 batch ID'); const input = node('input'); input.placeholder = 'batch_…'; input.value = attachDrafts.get(j.id) || ''; input.addEventListener('input', () => attachDrafts.set(j.id, input.value)); label.append(input); card.append(label);
+        if (j.status === 'unknown' || j.status === 'submitting' || (j.status === 'failed' && batchIdFromNotFound(j.error))) {
+          const label = node('label', 'OpenRouter에서 확인한 batch ID'); const input = node('input'); input.placeholder = 'batch_… 또는 batch-…'; input.value = attachDrafts.get(j.id) || j.batchId || batchIdFromNotFound(j.error); input.addEventListener('input', () => attachDrafts.set(j.id, input.value)); label.append(input); card.append(label);
           card.append(button('기존 작업 연결', async () => { await engine.attach(j, input.value.trim()); renderJobs(); }));
         }
         jobs.append(card);
@@ -527,6 +636,7 @@
     await Risuai.onUnload(async () => {
       disposed = true; clearTimeout(timer); for (const c of waiters) c.abort();
       if (ui?.id) await Risuai.unregisterUIPart(ui.id);
+      try { await noticeQueue; if (floatingNotice) await floatingNotice.remove(); } catch { /* optional UI */ }
       style.remove(); root.remove();
     });
   }
