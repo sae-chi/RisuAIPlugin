@@ -1,6 +1,6 @@
 //@name ooc_scrapbook
 //@api 3.0
-//@version 1.25.4
+//@version 1.27.0
 //@display-name OOC Scrapbook
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/OOC_Scrapbook.js
 
@@ -14,7 +14,7 @@
   }
 
   const PLUGIN_NAME = 'OOC Scrapbook';
-  const PLUGIN_VERSION = '1.25.4';
+  const PLUGIN_VERSION = '1.27.0';
   const DEFAULT_OOC_TEXT = '(ooc: pause the currently ongoing storyline. And write a complete episode based on the instructions given)';
   const STORAGE_KEY = 'ooc-scrapbook:data:v1';   // 예전 통짜 저장 키 (자동 이전 후 정리)
   const NOTES_KEY = 'ooc-scrapbook:notes:v1';    // 메모 본문 (용량의 99.9%)
@@ -31,7 +31,7 @@
     3: [{ location: 'hamburger', id: HAMBURGER_ID }, { location: 'chat', id: MENU_ID }],
   };
   const BUTTON_PLACEMENT_LABELS = { 0: '없음', 1: '햄버거 메뉴', 2: '채팅 메뉴', 3: '둘 다' };
-  const SCHEMA_VERSION = 6;
+  const SCHEMA_VERSION = 7;
   const MAX_MEMO_TABS = 4;
   const OOC_TAB = '__ooc';
   const PAGE_SIZES = [15, 30, 45, 0]; // 0 = 무제한
@@ -163,6 +163,12 @@
     localAI: { apiKey: '', bodyJson: '{}' },
     deviceStorage: null,
     screen: 'list',
+    collection: 'scrap',
+    quickDraft: { texts: {}, sourceUrl: '', tags: '' },
+    quickComposerOpen: false,
+    quickLang: 'ko',
+    quickNoteLangs: new Map(),
+    savingQuick: false,
     selectedId: null,
     selectionMode: false,
     selectedNoteIds: new Set(),
@@ -448,6 +454,7 @@
     return {
       id: typeof value?.id === 'string' && value.id ? value.id : makeId(),
       title: typeof value?.title === 'string' && value.title.trim() ? value.title.trim() : '제목 없는 메모',
+      kind: value?.kind === 'quick' ? 'quick' : 'scrap',
       tabs,
       tags,
       oocPrefix: typeof value?.oocPrefix === 'string' ? value.oocPrefix : '',
@@ -773,7 +780,7 @@
   function sortedNotes() {
     const query = state.search.trim().toLocaleLowerCase();
     const notes = [...state.data.notes].filter((note) => {
-      if (note.deletedAt) return false;
+      if (note.deletedAt || note.kind !== state.collection) return false;
       if (state.languageFilter && !noteHasLang(note, state.languageFilter)) return false;
       if (state.tagFilter === '__nosource') {
         if (note.sourceUrl || note.isOriginal) return false;
@@ -852,6 +859,56 @@
     applyTheme();
     document.body.innerHTML = `
       <style>
+        .collection-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+        .collection-bar .tabs { flex:0 1 auto; min-width:0; }
+        .collection-bar > .btn { flex:0 0 auto; margin-left:auto; white-space:nowrap; }
+        .quick-composer { display:flex; flex-direction:column; gap:12px; padding:16px; margin-bottom:20px; border:1px solid var(--accent-border); border-radius:12px; background:var(--paper-2); }
+        .quick-composer textarea { min-height:100px; resize:vertical; }
+        .quick-composer .tabs { flex-wrap:wrap; max-width:100%; }
+        .quick-composer.is-fold { display:block; padding:0; }
+        .composer-summary { display:flex; align-items:center; gap:8px; padding:12px 16px; border-radius:12px; list-style:none; user-select:none; cursor:pointer; }
+        .composer-summary::-webkit-details-marker { display:none; }
+        .composer-summary:focus-visible { outline:3px solid var(--focus); outline-offset:2px; }
+        .composer-chevron { margin-left:auto; color:var(--muted); transition:transform .15s ease; }
+        .is-fold[open] > .composer-summary .composer-chevron { transform:rotate(180deg); }
+        .composer-draft-badge { padding:2px 7px; border:1px solid var(--accent-border); border-radius:999px; background:var(--accent-soft); color:var(--accent-strong); font-size:10px; font-weight:800; }
+        .composer-draft-badge[hidden] { display:none; }
+        .composer-body { display:flex; flex-direction:column; gap:12px; padding:0 16px 16px; }
+        .composer-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; }
+        .composer-title { font-size:13px; font-weight:800; letter-spacing:-.01em; }
+        .quick-fields { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); align-items:start; gap:12px; }
+        .quick-fields .form-group { min-width:0; margin:0; }
+        .quick-fields .tag-editor { height:auto; min-height:42px; }
+        .composer-foot { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-top:12px; border-top:1px solid var(--line); }
+        .composer-foot.end { justify-content:flex-end; gap:8px; }
+        .composer-foot .hint { margin:0; }
+        .composer-foot .hint + .btn { flex:0 0 auto; margin-left:auto; }
+        .screen-edit > .quick-composer { flex:1 1 auto; min-height:0; margin-bottom:0; overflow:auto; }
+        .quick-composer.is-editor textarea { flex:1 1 auto; min-height:200px; resize:none; }
+        .memo-grid.quick:not(.rows) { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+        .memo-grid.quick.rows { gap:10px; }
+        .quick-card { display:flex; flex-direction:column; gap:12px; min-width:0; padding:16px; border:1px solid var(--accent-border); border-radius:12px; background:var(--paper); }
+        .quick-card.is-selected { outline:2px solid var(--accent); }
+        .quick-card-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px; }
+        .quick-card-head .btn { min-height:30px; padding:4px 10px; font-size:12px; }
+        .quick-card .tabs { flex-wrap:wrap; max-width:100%; padding:2px; }
+        .quick-card .tab { min-width:68px; min-height:28px; padding:4px 10px; }
+        .quick-date { margin-left:auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+        .quick-body { flex:1 1 auto; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:240px; overflow:auto; }
+        .quick-card .note-tags { margin:0; }
+        .quick-card-foot { display:flex; align-items:center; gap:8px; margin-top:auto; padding-top:12px; border-top:1px solid var(--line); }
+        .quick-card-foot > .btn { min-height:34px; padding:6px 12px; font-size:12px; }
+        .card-menu { position:relative; flex:0 0 auto; margin-left:auto; }
+        .card-menu > summary { list-style:none; user-select:none; }
+        .card-menu > summary::-webkit-details-marker { display:none; }
+        .card-menu > summary.icon-btn { width:34px; min-height:34px; font-size:16px; }
+        .card-menu[open] > summary { border-color:var(--accent); background:var(--accent-soft); }
+        .card-menu-list { position:absolute; z-index:6; top:calc(100% + 6px); right:0; display:flex; flex-direction:column; min-width:170px; padding:5px; border:1px solid var(--line-strong); border-radius:11px; background:var(--surface-solid); box-shadow:var(--shadow); }
+        .menu-item { display:block; width:100%; padding:8px 10px; border:0; border-radius:8px; background:transparent; color:var(--ink); text-align:left; text-decoration:none; font-size:12.5px; font-weight:700; cursor:pointer; }
+        .menu-item:hover, .menu-item:focus-visible { outline:none; background:var(--accent-soft); color:var(--accent-strong); }
+        .menu-item.danger { color:var(--danger); }
+        .menu-item.danger:hover, .menu-item.danger:focus-visible { background:rgba(164,78,85,.08); color:var(--danger); }
+        .menu-sep { height:1px; margin:4px 2px; background:var(--line); }
         :root {
           color-scheme: light;
           --ink: #292625;
@@ -924,7 +981,9 @@
         .brand h1 { margin: 0; font-family: ui-serif, "Noto Serif KR", Georgia, serif; font-size: 21px; font-weight: 700; letter-spacing: -.025em; }
         .brand-ver { color: var(--muted); font-family: Inter, Pretendard, sans-serif; font-size: 11px; font-weight: 700; vertical-align: 2px; }
         .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
-        .toolbar { display: flex; gap: 8px; align-items: center; }
+        .toolbar { display: flex; gap: 10px; align-items: center; }
+        .toolbar-group { display: flex; gap: 8px; align-items: center; }
+        .toolbar-sep { flex: 0 0 auto; width: 1px; height: 22px; background: var(--line-strong); }
         .icon-btn, .btn, .tab, .memo-card {
           border: 1px solid var(--line); cursor: pointer;
           transition: border-color .15s ease, background-color .15s ease, color .15s ease;
@@ -1028,8 +1087,9 @@
         .editor-meta-row { display: grid; grid-template-columns: minmax(0, 4fr) minmax(0, 3fr); gap: 12px; align-items: start; }
         .editor-meta-row > .form-group { min-width: 0; }
         .editor-meta-row > .editor-tags { grid-column: 1 / -1; }
-        .search-selection-group { display: flex; align-items: center; gap: 8px; flex: 1 1 220px; min-width: 0; }
-        .list-tools .search-selection-group .search-wrap { flex: 1 1 0; min-width: 0; }
+        .list-tools > .search-wrap { flex: 1 1 220px; min-width: 0; }
+        .list-filters, .list-modes { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+        .list-modes { padding-left: 10px; border-left: 1px solid var(--line); }
         .selection-toggle { flex: 0 0 auto; }
         .selection-toggle[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
         .selection-tools:empty { display: none; }
@@ -1266,16 +1326,19 @@
         /* Compact rows keep titles, tags and metadata on separate tracks. */
         @media (max-width: 700px) {
           .topbar { flex: 0 0 auto; flex-wrap: wrap; gap: 8px; }
-          .brand { flex: 1 0 100%; }
+          .brand { flex: 1 1 auto; }
           .brand h1 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; font-size: 19px; }
           .brand-ver { white-space: nowrap; }
-          .toolbar { width: 100%; min-width: 0; flex-wrap: wrap; gap: 6px; }
-          .toolbar > button { flex: 0 0 auto; white-space: nowrap; }
-          .toolbar [data-action="close"] { margin-left: auto; }
+          .toolbar { display: contents; }
+          .toolbar-controls { order: 2; }
+          .toolbar-nav { order: 3; flex: 1 0 100%; }
+          .toolbar-sep { display: none; }
           .list-tools { gap: 8px; }
-          .search-selection-group { flex: 1 0 100%; width: 100%; }
-          .list-tools .select.slim { flex: 1 1 75px; min-width: 0; max-width: 100%; }
-          .list-tools > .icon-btn { flex: 0 0 36px; }
+          .list-tools > .search-wrap { flex: 1 0 100%; }
+          .list-filters { flex: 1 1 auto; min-width: 0; }
+          .list-filters .select.slim { flex: 1 1 75px; min-width: 0; max-width: 100%; }
+          .list-modes { padding-left: 0; border-left: 0; }
+          .memo-grid.quick:not(.rows) { grid-template-columns: minmax(0, 1fr); }
           .memo-grid.rows .memo-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 10px; padding: 12px; text-align: left; }
           .memo-grid.rows .memo-index { grid-column: 1; grid-row: 1; min-width: 20px; text-align: left; }
           .memo-grid.rows .selection-mark { grid-column: 1; grid-row: 2; align-self: start; }
@@ -1297,6 +1360,20 @@
           .content.screen-edit { display: block; overflow: auto; }
           .screen-edit .editor-textarea { min-height: 320px; resize: vertical; }
           .screen-edit > .actions { justify-content: flex-start; }
+        }
+        @media (max-width: 620px) {
+          .quick-fields { grid-template-columns: minmax(0, 1fr); }
+          .quick-composer { padding: 14px; }
+          .composer-summary { padding: 12px 14px; }
+          .composer-body { padding: 0 14px 14px; }
+          .composer-foot .hint { display: none; }
+          .composer-foot .hint + .btn { width: 100%; }
+        }
+        @media (max-width: 420px) {
+          .collection-bar { flex-wrap: wrap; }
+          .collection-bar .tabs { flex: 1 1 100%; }
+          .collection-bar .tab { flex: 1 1 0; min-width: 0; }
+          .collection-bar > .btn { flex: 1 0 100%; }
         }
         @media (prefers-reduced-motion: reduce) {
           *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
@@ -1321,22 +1398,20 @@
     const toolbar = document.getElementById('top-toolbar');
     if (!toolbar) return;
     const dark = state.data.settings.theme === 'dark';
-    const themeButton = `<button class="icon-btn" data-action="toggle-theme" data-tip="${dark ? '라이트모드로 전환' : '다크모드로 전환'}" aria-label="${dark ? '라이트모드로 전환' : '다크모드로 전환'}">${dark ? '☀' : '☾'}</button>`;
-    if (state.screen === 'list') {
-      toolbar.innerHTML = `
-        <button class="icon-btn" data-action="open-trash" data-tip="휴지통" aria-label="휴지통">🗑</button>
-        <button class="btn" data-action="open-settings">${buttonIcon('⚙', '설정')}</button>
-        <button class="btn primary" data-action="new-note">${buttonIcon('＋', '새 메모')}</button>
-        ${themeButton}
+    const themeLabel = dark ? '라이트모드로 전환' : '다크모드로 전환';
+    // 왼쪽 그룹 = 현재 화면에서 갈 수 있는 곳 / 오른쪽 그룹 = 모든 화면 공통(테마·닫기)
+    const nav = state.screen === 'list'
+      ? `<button class="icon-btn" data-action="open-trash" data-tip="휴지통" aria-label="휴지통">🗑</button>
+         <button class="icon-btn" data-action="open-settings" data-tip="설정" aria-label="설정">⚙</button>`
+      : `<button class="btn" data-action="back">${buttonIcon('←', '목록')}</button>`;
+    toolbar.innerHTML = `
+      <div class="toolbar-group toolbar-nav">${nav}</div>
+      <span class="toolbar-sep" aria-hidden="true"></span>
+      <div class="toolbar-group toolbar-controls">
+        <button class="icon-btn" data-action="toggle-theme" data-tip="${themeLabel}" aria-label="${themeLabel}">${dark ? '☀' : '☾'}</button>
         <button class="icon-btn" data-action="close" data-tip="닫기" aria-label="닫기">×</button>
-      `;
-    } else {
-      toolbar.innerHTML = `
-        <button class="btn" data-action="back">${buttonIcon('←', '목록')}</button>
-        ${themeButton}
-        <button class="icon-btn" data-action="close" data-tip="닫기" aria-label="닫기">×</button>
-      `;
-    }
+      </div>
+    `;
   }
 
   function applyTheme() {
@@ -1409,6 +1484,166 @@
     else renderSettings(main);
   }
 
+  function quickDraftHasContent() {
+    const d = state.quickDraft;
+    return Object.values(d.texts).some(t => String(t || '').trim()) || Boolean(String(d.sourceUrl || '').trim()) || Boolean(String(d.tags || '').trim());
+  }
+
+  function renderQuickComposer() {
+    const draft = state.quickDraft;
+    if (!languages().some(lang => lang.code === state.quickLang)) state.quickLang = languages()[0]?.code || 'ko';
+    return `<details class="quick-composer is-fold" aria-label="새 인풋 조각" ${state.quickComposerOpen ? 'open' : ''}>
+      <summary class="composer-summary">
+        <span class="composer-title">새 인풋 조각</span>
+        <span class="composer-draft-badge" ${quickDraftHasContent() ? '' : 'hidden'}>작성 중</span>
+        <span class="composer-chevron" aria-hidden="true">▾</span>
+      </summary>
+      <div class="composer-body">
+        <div class="composer-head">${renderQuickLanguages(null)}</div>
+        <textarea id="quick-text" class="textarea" data-quick-field="text" aria-label="${escapeAttribute(langLabel(state.quickLang))} 인풋 조각" placeholder="짧은 문장이나 인풋 내용을 입력…">${escapeHtml(draft.texts[state.quickLang] || '')}</textarea>
+        <div class="quick-fields">
+          <div class="form-group"><label for="quick-source">출처 링크 (선택)</label><input id="quick-source" class="field" type="url" data-quick-field="sourceUrl" placeholder="https://…" value="${escapeAttribute(draft.sourceUrl)}"></div>
+          <div class="form-group"><label for="quick-tags">태그 (선택 · 쉼표로 구분)</label><input id="quick-tags" class="field" data-quick-field="tags" value="${escapeAttribute(draft.tags)}"></div>
+        </div>
+        <div class="composer-foot"><span class="hint">Enter 줄바꿈 · Ctrl/Cmd+Enter 저장</span><button class="btn primary" data-action="save-quick" ${state.savingQuick ? 'disabled' : ''}>${state.savingQuick ? '저장 중…' : '저장'}</button></div>
+      </div>
+    </details>`;
+  }
+
+  function quickNoteLanguage(note) {
+    const selected = state.quickNoteLangs.get(note.id);
+    return languages().some(lang => lang.code === selected) && tabText(note.tabs[0], selected).trim()
+      ? selected : pickDefaultLang(note, note.tabs[0]);
+  }
+
+  function renderQuickLanguages(note) {
+    const active = note ? quickNoteLanguage(note) : state.quickLang;
+    return `<div class="tabs" role="tablist" aria-label="${note ? '인풋 조각 언어' : '작성 언어'}">${languages().map(lang => {
+      const empty = note && !tabText(note.tabs[0], lang.code).trim();
+      const filled = !note && Boolean(state.quickDraft.texts[lang.code]?.trim());
+      return `<button class="tab ${active === lang.code ? 'active' : ''}${empty ? ' empty' : ''}" role="tab" aria-selected="${active === lang.code}" data-action="switch-quick-language" data-id="${note ? escapeAttribute(note.id) : ''}" data-lang="${escapeAttribute(lang.code)}" ${empty ? 'disabled' : ''}>${escapeHtml(lang.label)}${filled ? ' •' : ''}</button>`;
+    }).join('')}</div>`;
+  }
+
+  function quickBody(note) {
+    const tab = note.tabs[0];
+    return tab ? tabText(tab, quickNoteLanguage(note)) : '';
+  }
+
+  function renderQuickCard(note) {
+    const id = escapeAttribute(note.id);
+    const selected = state.selectedNoteIds.has(note.id);
+    // 자주 쓰는 동작(복사·전송·수정)은 밖에, 나머지는 ⋯ 메뉴 안에 묶는다.
+    const menu = `<details class="card-menu">
+          <summary class="icon-btn" data-tip="더보기" aria-label="더보기" aria-haspopup="menu">⋯</summary>
+          <div class="card-menu-list" role="menu">
+            <button class="menu-item" role="menuitem" data-action="view-note" data-id="${id}">상세</button>
+            ${note.sourceUrl ? `<a class="menu-item" role="menuitem" href="${escapeAttribute(note.sourceUrl)}" target="_blank" rel="noopener noreferrer">출처 열기</a>
+            <button class="menu-item" role="menuitem" data-action="copy-source" data-url="${escapeAttribute(note.sourceUrl)}">링크 복사</button>` : ''}
+            <button class="menu-item" role="menuitem" data-action="move-collection" data-id="${id}">로어북으로 옮기기</button>
+            <div class="menu-sep" role="separator"></div>
+            <button class="menu-item danger" role="menuitem" data-action="delete-quick" data-id="${id}">삭제</button>
+          </div>
+        </details>`;
+    return `<article class="quick-card${selected ? ' is-selected' : ''}">
+      <div class="quick-card-head">
+        ${state.selectionMode ? `<button class="btn" data-action="select-note" data-id="${id}" aria-pressed="${selected}">${selected ? '☑ 선택됨' : '☐ 선택'}</button>` : ''}
+        ${renderQuickLanguages(note)}
+        <span class="quick-date">${escapeHtml(relativeDate(note.updatedAt))}</span>
+      </div>
+      <p class="quick-body">${escapeHtml(quickBody(note))}</p>
+      ${note.tags.length ? `<div class="note-tags">${note.tags.map(tag => `<span class="tag-chip">#${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
+      ${!state.selectionMode ? `<div class="quick-card-foot">
+        <button class="btn" data-action="edit-quick" data-id="${id}">수정</button>
+        <button class="btn" data-action="copy-quick" data-id="${id}">복사</button>
+        <button class="btn blue" data-action="send-quick" data-id="${id}" ${state.sending ? 'disabled' : ''}>${buttonIcon('➤', '채팅에 전송')}</button>
+        ${menu}
+      </div>` : ''}
+    </article>`;
+  }
+
+  async function saveQuickNote() {
+    if (state.savingQuick) return;
+    if (state.loadFailed) { toast('저장 데이터를 먼저 복구해 주세요.', 'error'); return; }
+    const draft = { ...state.quickDraft, texts: { ...state.quickDraft.texts } };
+    const firstText = draft.texts[state.quickLang]?.trim() || Object.values(draft.texts).find(text => text.trim()) || '';
+    if (!firstText) { toast('내용을 입력해 주세요.', 'error'); return; }
+    let sourceUrl;
+    try { sourceUrl = validateSourceUrl(draft.sourceUrl); }
+    catch (error) { toast(error.message, 'error'); return; }
+    const tags = [...new Set(draft.tags.split(',').map(t => t.trim().replace(/^#+/, '')).filter(Boolean))];
+    if (tags.length > 20 || tags.some(t => t.length > 40)) { toast('태그는 40자 이내, 최대 20개까지 입력할 수 있습니다.', 'error'); return; }
+    const tab = createDefaultMemoTab(0, false);
+    Object.assign(tab.texts, Object.fromEntries(Object.entries(draft.texts).map(([code, text]) => [code, text.trimEnd()])));
+    const note = normalizeNote({ kind: 'quick', title: firstText.trim().split(/\r?\n/)[0].slice(0, 60), tabs: [tab], tags, sourceUrl, noDefaultOoc: true });
+    state.savingQuick = true;
+    const button = document.querySelector('[data-action="save-quick"]');
+    if (button) button.disabled = true;
+    state.data.notes.push(note);
+    try {
+      await saveData();
+      // 저장 중 추가로 입력한 내용은 보존한다.
+      if (JSON.stringify(state.quickDraft) === JSON.stringify(draft)) state.quickDraft = { texts: {}, sourceUrl: '', tags: '' };
+      state.quickNoteLangs.set(note.id, state.quickLang);
+      state.page = 1;
+      state.search = state.tagFilter = state.languageFilter = '';
+      state.sortMode = 'recent';
+      toast('인풋 조각을 저장했습니다.', 'success');
+    } catch (error) {
+      state.data.notes = state.data.notes.filter(item => item.id !== note.id);
+      toast(String(error?.message || '저장에 실패했습니다.'), 'error');
+    } finally {
+      state.savingQuick = false;
+      if (state.screen === 'list' && state.collection === 'quick') {
+        renderList(document.getElementById('main-content'));
+        document.getElementById('quick-text')?.focus();
+      }
+    }
+  }
+
+  async function handleQuickAction(action, id) {
+    if (state.savingQuick) return;
+    const note = state.data.notes.find(item => item.id === id && !item.deletedAt);
+    if (!note) return;
+    if (action === 'edit-quick') { openEditor(note); return; }
+    if (action === 'send-quick') { await sendContentToChat(quickBody(note)); return; }
+    if (action === 'copy-quick') {
+      try { await copyText(quickBody(note)); toast('본문을 복사했습니다.', 'success'); }
+      catch { toast('클립보드 복사에 실패했습니다.', 'error'); }
+      return;
+    }
+    if (state.loadFailed) { toast('저장 데이터를 먼저 복구해 주세요.', 'error'); return; }
+    if (action === 'delete-quick' && !await confirmMemoAction('인풋 조각을 삭제할까요?', '휴지통에서 복원할 수 있습니다.', '삭제')) return;
+    const next = { ...note };
+    if (action === 'delete-quick') next.deletedAt = Date.now();
+    else { next.kind = note.kind === 'quick' ? 'scrap' : 'quick'; next.updatedAt = Date.now(); }
+    const index = state.data.notes.indexOf(note);
+    state.data.notes[index] = next;
+    state.savingQuick = true;
+    try {
+      await saveData();
+      if (action === 'move-collection') state.collection = next.kind;
+      state.search = state.tagFilter = state.languageFilter = '';
+      state.listScroll = 0;
+      state.restoreListScroll = false;
+      state.selectedNoteIds.clear();
+      state.selectionMode = false;
+      state.selectedId = null;
+      state.screen = 'list';
+      state.page = 1;
+      render();
+      toast(action === 'delete-quick' ? '휴지통으로 이동했습니다.' : '메모를 옮겼습니다.', 'success');
+    } catch (error) {
+      state.data.notes[index] = note;
+      toast(String(error?.message || '저장에 실패했습니다.'), 'error');
+    } finally {
+      state.savingQuick = false;
+      const button = document.querySelector('[data-action="save-quick"]');
+      if (button) { button.disabled = false; button.textContent = '저장'; }
+    }
+  }
+
+
   function renderList(main) {
     const tags = allTags();
     const filterLanguages = languages();
@@ -1420,27 +1655,37 @@
     const settings = state.data.settings;
     const rows = settings.viewMode === 'rows';
     main.innerHTML = `
-      <div class="list-tools">
-        <div class="search-selection-group">
-          <button id="selection-toggle" class="icon-btn selection-toggle" data-action="toggle-selection" aria-label="선택 모드" aria-pressed="${state.selectionMode}" data-tip="선택 모드"><span aria-hidden="true">☑️</span></button>
-        <div class="search-wrap"><span>⌕</span><input id="list-search" class="field" type="search" placeholder="제목·내용·태그 검색" value="${escapeAttribute(state.search)}"></div>
+      <div class="collection-bar">
+        <div class="tabs" role="tablist" aria-label="메모 종류">
+          <button class="tab ${state.collection === 'scrap' ? 'active' : ''}" role="tab" aria-selected="${state.collection === 'scrap'}" data-action="switch-collection" data-kind="scrap">로어북</button>
+          <button class="tab ${state.collection === 'quick' ? 'active' : ''}" role="tab" aria-selected="${state.collection === 'quick'}" data-action="switch-collection" data-kind="quick">인풋 조각</button>
         </div>
-        <select id="list-tag-filter" class="select field slim" aria-label="필터">
-          <option value="">전체</option>
-          <option value="__nosource" ${state.tagFilter === '__nosource' ? 'selected' : ''}>출처 없음만</option>
-          <option value="__noooc" ${state.tagFilter === '__noooc' ? 'selected' : ''}>말머리 없음만</option>
-          ${filterLanguages.map((lang) => `<option value="__lang:${escapeAttribute(lang.code)}" ${state.languageFilter === lang.code ? 'selected' : ''}>${escapeHtml(lang.label)} 내용 있음</option>`).join('')}
-          ${tags.map((tag) => `<option value="__tag:${escapeAttribute(tag)}" ${state.tagFilter === tag ? 'selected' : ''}>#${escapeHtml(tag)}</option>`).join('')}
-        </select>
-        <select id="list-sort" class="select field slim" aria-label="정렬">
-          <option value="recent" ${state.sortMode === 'recent' ? 'selected' : ''}>최신순</option>
-          <option value="title" ${state.sortMode === 'title' ? 'selected' : ''}>제목순</option>
-          <option value="tag" ${state.sortMode === 'tag' ? 'selected' : ''}>태그순</option>
-        </select>
-        <select id="list-page-size" class="select field slim" aria-label="페이지당 개수">
-          ${PAGE_SIZES.map((size) => `<option value="${size}" ${settings.pageSize === size ? 'selected' : ''}>${size === 0 ? '무제한' : `${size}개씩`}</option>`).join('')}
-        </select>
-        <button class="icon-btn" data-action="toggle-view" data-tip="${rows ? '그리드 보기로 전환' : '목록 보기로 전환'}" aria-label="${rows ? '그리드 보기로 전환' : '목록 보기로 전환'}">${rows ? '▦' : '☰'}</button>
+        ${state.collection === 'quick' ? '' : `<button class="btn primary" data-action="new-note">${buttonIcon('＋', '새 로어북')}</button>`}
+      </div>
+      ${state.collection === 'quick' ? renderQuickComposer() : ''}
+      <div class="list-tools">
+        <div class="search-wrap"><span>⌕</span><input id="list-search" class="field" type="search" placeholder="제목·내용·태그 검색" value="${escapeAttribute(state.search)}"></div>
+        <div class="list-filters">
+          <select id="list-tag-filter" class="select field slim" aria-label="필터">
+            <option value="">전체</option>
+            <option value="__nosource" ${state.tagFilter === '__nosource' ? 'selected' : ''}>출처 없음만</option>
+            <option value="__noooc" ${state.tagFilter === '__noooc' ? 'selected' : ''}>말머리 없음만</option>
+            ${filterLanguages.map((lang) => `<option value="__lang:${escapeAttribute(lang.code)}" ${state.languageFilter === lang.code ? 'selected' : ''}>${escapeHtml(lang.label)} 내용 있음</option>`).join('')}
+            ${tags.map((tag) => `<option value="__tag:${escapeAttribute(tag)}" ${state.tagFilter === tag ? 'selected' : ''}>#${escapeHtml(tag)}</option>`).join('')}
+          </select>
+          <select id="list-sort" class="select field slim" aria-label="정렬">
+            <option value="recent" ${state.sortMode === 'recent' ? 'selected' : ''}>최신순</option>
+            <option value="title" ${state.sortMode === 'title' ? 'selected' : ''}>제목순</option>
+            <option value="tag" ${state.sortMode === 'tag' ? 'selected' : ''}>태그순</option>
+          </select>
+          <select id="list-page-size" class="select field slim" aria-label="페이지당 개수">
+            ${PAGE_SIZES.map((size) => `<option value="${size}" ${settings.pageSize === size ? 'selected' : ''}>${size === 0 ? '무제한' : `${size}개씩`}</option>`).join('')}
+          </select>
+        </div>
+        <div class="list-modes">
+          <button id="selection-toggle" class="icon-btn selection-toggle" data-action="toggle-selection" aria-label="선택 모드" aria-pressed="${state.selectionMode}" data-tip="선택 모드"><span aria-hidden="true">☑︎️</span></button>
+          <button class="icon-btn" data-action="toggle-view" data-tip="${rows ? '그리드 보기로 전환' : '목록 보기로 전환'}" aria-label="${rows ? '그리드 보기로 전환' : '목록 보기로 전환'}">${rows ? '▦' : '☰'}</button>
+        </div>
       </div>
       <div id="selection-tools" class="selection-tools"></div>
       <div id="memo-list"></div>
@@ -1494,7 +1739,7 @@
       const searching = Boolean(state.search.trim());
       host.innerHTML = searching
         ? '<div class="empty"><div><div class="empty-mark">⌕</div><h2>찾은 스크랩이 없어요</h2><p>다른 검색어를 입력해 보세요.</p></div></div>'
-        : '<div class="empty"><p class="empty-message">스크랩북이 비어 있습니다.</p></div>';
+        : `<div class="empty"><p class="empty-message">${state.collection === 'quick' ? '인풋 조각이 없습니다.' : '로어북이 없습니다.'}</p></div>`;
       return;
     }
     const pageSize = PAGE_SIZES.includes(state.data.settings.pageSize) ? state.data.settings.pageSize : 15;
@@ -1511,7 +1756,8 @@
         <button class="icon-btn" data-action="page-nav" data-page="${totalPages}" ${state.page >= totalPages ? 'disabled' : ''} aria-label="마지막 페이지">»</button>
       </div>` : '';
     const indexBase = pageSize > 0 ? (state.page - 1) * pageSize : 0; // 페이지가 넘어가도 번호는 이어짐
-    host.innerHTML = `<div class="memo-grid ${rows ? 'rows' : ''}">${pageNotes.map((note, i) => {
+    host.innerHTML = `<div class="memo-grid ${rows ? 'rows' : ''}${state.collection === 'quick' ? ' quick' : ''}">${pageNotes.map((note, i) => {
+      if (state.collection === 'quick') return renderQuickCard(note);
       const langChips = languages()
         .filter((lang) => noteHasLang(note, lang.code))
         .map((lang) => `<span class="lang-chip">${escapeHtml(langChipText(lang))}</span>`)
@@ -1608,6 +1854,7 @@
       ${renderMemoTabs(note.tabs)}
       <article class="note-paper viewer-note${state.activeLang === 'en' ? ' lang-en' : ''}">${escapeHtml(content)}</article>
       <div class="actions viewer-actions">
+        <button class="btn" data-action="move-collection" data-id="${escapeAttribute(note.id)}">${note.kind === 'quick' ? '로어북으로 옮기기' : '인풋 조각으로 옮기기'}</button>
         <button class="btn" data-action="edit-note">${buttonIcon('✎', '편집')}</button>
         <button class="btn" data-action="copy-current">${buttonIcon('⧉', '복사')}</button>
         <button class="btn" data-action="open-custom-copy" data-tip="{{user}}·{{char}}를 원하는 이름으로 바꿔서 복사합니다 (시뮬봇용)">${buttonIcon('⇄', '커스텀 복사')}</button>
@@ -1687,6 +1934,23 @@
     }
     const memoTab = currentDraftTab();
     const content = memoTab ? tabText(memoTab, state.activeLang) : '';
+    if (state.draft.kind === 'quick') {
+      main.innerHTML = `<div class="quick-composer is-editor">
+        ${renderMemoTabs(state.draft.tabs)}
+        <div class="composer-head">
+          <label class="composer-title" for="note-content">인풋 조각 수정</label>
+          ${renderLangTabs()}
+        </div>
+        <textarea id="note-content" class="textarea">${escapeHtml(content)}</textarea>
+        <div class="quick-fields">
+          <div class="form-group"><label for="note-source-url">출처 링크 (선택)</label><input id="note-source-url" class="field" type="url" value="${escapeAttribute(state.draft.sourceUrl || '')}"></div>
+          <div class="form-group"><label>태그 (선택)</label><div class="tag-editor-wrap"><div id="tag-editor" class="field tag-editor" data-action="focus-tag-input"></div><div id="tag-suggest" class="tag-suggest" hidden></div></div></div>
+        </div>
+        <div class="composer-foot end"><button class="btn primary" data-action="save-note">저장</button><button class="btn" data-action="cancel-edit">취소</button></div>
+      </div>`;
+      renderTagRow(false);
+      return;
+    }
     main.innerHTML = `
       <div class="editor-meta-row">
         <div class="form-group">
@@ -1952,6 +2216,7 @@
     state.draft = note
       ? {
           id: note.id,
+          kind: note.kind,
           title: note.title,
           tabs: note.tabs.map((tab) => ({ ...tab, texts: { ...(tab.texts || {}) } })),
           sourceUrl: note.sourceUrl || '',
@@ -1962,12 +2227,12 @@
           noDefaultOoc: note.noDefaultOoc === true,
           defaultLang: note.defaultLang || '',
         }
-      : { id: null, title: '', tabs: [createDefaultMemoTab(0, false)], sourceUrl: '', isOriginal: false, createdAt: Date.now(), tags: [], oocPrefix: '', noDefaultOoc: false, defaultLang: '' };
+      : { id: null, kind: state.collection, title: '', tabs: [createDefaultMemoTab(0, false)], sourceUrl: '', isOriginal: false, createdAt: Date.now(), tags: [], oocPrefix: '', noDefaultOoc: false, defaultLang: '' };
     state.selectedId = note?.id || null;
     state.activeMemoTabId = state.draft.tabs[0].id;
     state.renamingMemoTabId = null;
     state.renamingMemoTabOriginalName = null;
-    state.activeLang = note ? pickDefaultLang(note, note.tabs[0]) : (languages()[0]?.code || 'ko');
+    state.activeLang = note ? (note.kind === 'quick' ? quickNoteLanguage(note) : pickDefaultLang(note, note.tabs[0])) : (languages()[0]?.code || 'ko');
     state.screen = 'edit';
     render();
   }
@@ -2052,6 +2317,8 @@
   }
 
   async function saveNote() {
+    if (state.savingQuick) return;
+    if (state.loadFailed) { toast('저장 데이터를 먼저 복구해 주세요.', 'error'); return; }
     captureDraftFromDOM();
     const draft = state.draft;
     if (!draft) return;
@@ -2074,6 +2341,7 @@
     catch (error) { toast(String(error?.message || error), 'error'); return; }
     const note = normalizeNote({
       id: draft.id || makeId(),
+      kind: draft.kind,
       title: String(draft.title || '').trim() || fallbackTitle || '제목 없음',
       tabs,
       tags: draft.tags || [],
@@ -2086,9 +2354,19 @@
       updatedAt: Date.now(),
     });
     const index = state.data.notes.findIndex((item) => item.id === note.id);
+    const previous = index >= 0 ? state.data.notes[index] : null;
     if (index >= 0) state.data.notes[index] = note;
     else state.data.notes.push(note);
-    await saveData();
+    state.savingQuick = true;
+    try { await saveData(); }
+    catch (error) {
+      if (previous) state.data.notes[index] = previous;
+      else state.data.notes = state.data.notes.filter(item => item.id !== note.id);
+      toast(String(error?.message || '저장에 실패했습니다.'), 'error');
+      return;
+    } finally { state.savingQuick = false; }
+    state.collection = note.kind;
+    if (note.kind === 'quick') state.quickNoteLangs.set(note.id, state.activeLang);
     state.selectedId = note.id;
     state.activeMemoTabId = note.tabs.some((tab) => tab.id === state.activeMemoTabId)
       ? state.activeMemoTabId
@@ -2096,7 +2374,7 @@
     state.draft = null;
     state.renamingMemoTabId = null;
     state.renamingMemoTabOriginalName = null;
-    state.screen = 'view';
+    state.screen = note.kind === 'quick' ? 'list' : 'view';
     render();
     toast('저장했습니다.', 'success');
   }
@@ -2266,6 +2544,7 @@
 
   // 실제 적용되는 말머리: 메모에 있으면 그것, 없으면 (기능 켜짐+미사용 아님) 디폴트 말머리
   function effectivePrefix(note) {
+    if (note?.kind === 'quick') return '';
     const own = String(note?.oocPrefix || '').trim();
     if (own) return own;
     if (note?.noDefaultOoc) return '';
@@ -2273,7 +2552,7 @@
   }
 
   function usesDefaultOoc(note) {
-    return !String(note?.oocPrefix || '').trim() && !note?.noDefaultOoc && Boolean(defaultOocText());
+    return note?.kind !== 'quick' && !String(note?.oocPrefix || '').trim() && !note?.noDefaultOoc && Boolean(defaultOocText());
   }
 
   function composeOutput(note, memoTab) {
@@ -2336,17 +2615,27 @@
   }
 
   async function sendCurrentLanguage() {
-    if (state.sending) return;
     const note = currentNote();
     if (!note) return;
     const memoTab = currentMemoTab(note);
-    const content = composeOutput(note, memoTab);
+    await sendContentToChat(composeOutput(note, memoTab));
+  }
+
+  function refreshSendButtons() {
+    const main = document.getElementById('main-content');
+    if (!main) return;
+    if (state.screen === 'view') renderViewer(main);
+    else if (state.screen === 'list' && state.collection === 'quick') renderMemoCards();
+  }
+
+  async function sendContentToChat(content) {
+    if (state.sending) return;
     if (!content.trim()) {
       toast('내용이 비어 있습니다.', 'error');
       return;
     }
     state.sending = true;
-    renderViewer(document.getElementById('main-content'));
+    refreshSendButtons();
     try {
       const characterIndex = await api.getCurrentCharacterIndex();
       const chatIndex = await api.getCurrentChatIndex();
@@ -2366,7 +2655,7 @@
       toast(String(error?.message || '채팅 전송에 실패했습니다.'), 'error');
     } finally {
       state.sending = false;
-      if (state.screen === 'view') renderViewer(document.getElementById('main-content'));
+      refreshSendButtons();
     }
   }
 
@@ -2589,6 +2878,16 @@
     if (state.eventsBound) return;
     state.eventsBound = true;
 
+    // 작성창 접힘 상태 기억 + 접어도 "작성 중" 표시가 맞도록 갱신 (toggle은 버블링되지 않아 캡처로 받는다)
+    document.addEventListener('toggle', (event) => {
+      const el = event.target;
+      if (!el?.matches?.('details.quick-composer')) return;
+      state.quickComposerOpen = el.open;
+      const badge = el.querySelector('.composer-draft-badge');
+      if (badge) badge.hidden = !quickDraftHasContent();
+      if (el.open) document.getElementById('quick-text')?.focus();
+    }, true);
+
     document.body.addEventListener('mouseover', (event) => {
       const t = event.target.closest?.('[data-tip]');
       if (t) showTip(t); else hideTip();
@@ -2611,10 +2910,46 @@
           state.tagSuggestIndex = -1;
         }
       }
+      // ⋯ 메뉴: 바깥을 누르거나 메뉴 항목을 고르면 닫는다.
+      const clickedMenu = event.target.closest('details.card-menu');
+      for (const menu of document.querySelectorAll('details.card-menu[open]')) {
+        if (menu !== clickedMenu || event.target.closest('.card-menu-list')) menu.open = false;
+      }
       const target = event.target.closest('[data-action]');
       if (!target) return;
       const action = target.dataset.action;
-      if (target.disabled || state.deletingSelected || state.actionConfirmOpen) return;
+      if (target.disabled || state.deletingSelected || state.actionConfirmOpen || state.savingQuick) return;
+      if (action === 'switch-collection') {
+        if (state.savingQuick) return;
+        state.collection = target.dataset.kind === 'quick' ? 'quick' : 'scrap';
+        state.selectionMode = false;
+        state.selectedNoteIds.clear();
+        state.page = 1;
+        state.search = state.tagFilter = state.languageFilter = '';
+        state.listScroll = 0;
+        state.restoreListScroll = false;
+        render();
+        return;
+      }
+      if (action === 'switch-quick-language') {
+        const code = target.dataset.lang;
+        if (!languages().some(lang => lang.code === code)) return;
+        if (target.dataset.id) {
+          state.quickNoteLangs.set(target.dataset.id, code);
+          renderMemoCards();
+        } else {
+          state.quickLang = code;
+          const composer = document.querySelector('.quick-composer');
+          if (composer) composer.outerHTML = renderQuickComposer();
+          document.getElementById('quick-text')?.focus();
+        }
+        return;
+      }
+      if (action === 'save-quick') { await saveQuickNote(); return; }
+      if (action === 'copy-quick' || action === 'send-quick' || action === 'edit-quick' || action === 'delete-quick' || action === 'move-collection') {
+        await handleQuickAction(action, target.dataset.id);
+        return;
+      }
       if (action === 'toggle-selection') {
         state.selectionMode = !state.selectionMode;
         state.selectedNoteIds.clear();
@@ -2638,7 +2973,10 @@
       if (action === 'delete-selected') { await deleteSelectedNotes(); return; }
       if (action === 'backdrop-close' && isBackdropClick(event, target)) await api.hideContainer();
       else if (action === 'close') await api.hideContainer();
-      else if (action === 'new-note') openEditor(null);
+      else if (action === 'new-note') {
+        if (state.collection === 'quick') document.getElementById('quick-text')?.focus();
+        else openEditor(null);
+      }
       else if (action === 'toggle-theme') await toggleTheme();
       else if (action === 'set-color-theme') await setAppearance('colorTheme', target.dataset.value);
       else if (action === 'set-theme-mode') await setAppearance('theme', target.dataset.value);
@@ -2667,7 +3005,7 @@
         state.selectedId = target.dataset.id;
         const viewNote = currentNote();
         state.activeMemoTabId = viewNote?.tabs?.[0]?.id || null;
-        state.activeLang = viewNote ? pickDefaultLang(viewNote, viewNote.tabs[0]) : 'ko';
+        state.activeLang = viewNote ? (viewNote.kind === 'quick' ? quickNoteLanguage(viewNote) : pickDefaultLang(viewNote, viewNote.tabs[0])) : 'ko';
         state.screen = 'view';
         render();
       } else if (action === 'switch-tab') {
@@ -2863,7 +3201,10 @@
     });
 
     document.body.addEventListener('input', (event) => {
-      if (event.target.id === 'list-search') {
+      if (event.target.dataset.quickField) {
+        if (event.target.dataset.quickField === 'text') state.quickDraft.texts[state.quickLang] = event.target.value;
+        else state.quickDraft[event.target.dataset.quickField] = event.target.value;
+      } else if (event.target.id === 'list-search') {
         state.search = event.target.value;
         state.page = 1;
         clearTimeout(state.searchTimer);
@@ -2941,6 +3282,7 @@
     });
 
     document.addEventListener('keydown', async (event) => {
+      if (state.savingQuick && (event.key === 'Escape' || ((event.ctrlKey || event.metaKey) && ['s', 'Enter'].includes(event.key)))) { event.preventDefault(); return; }
       if (event.target.id === 'note-tag-input') {
         const input = event.target;
         const suggest = document.getElementById('tag-suggest');
@@ -2987,10 +3329,21 @@
         }
       }
       const modifier = event.ctrlKey || event.metaKey;
+      if (modifier && event.key === 'Enter' && !event.isComposing && state.screen === 'list' && state.collection === 'quick' && event.target.closest('.quick-composer')) {
+        event.preventDefault();
+        await saveQuickNote();
+        return;
+      }
       if (modifier && event.key.toLowerCase() === 's' && state.screen === 'edit') {
         event.preventDefault();
         await saveNote();
       } else if (event.key === 'Escape') {
+        const openCardMenu = document.querySelector('details.card-menu[open]');
+        if (openCardMenu) {
+          openCardMenu.open = false;
+          openCardMenu.querySelector('summary')?.focus();
+          return;
+        }
         if (state.importCandidate && state.screen === 'settings') {
           state.importCandidate = null;
           renderSettings(document.getElementById('main-content'));
@@ -3012,6 +3365,7 @@
   }
 
   async function openScrapbook(initialScreen = 'list') {
+    if (state.savingQuick) return;
     await Promise.all([loadData(), loadLocalAISettings()]);
     state.screen = initialScreen;
     state.selectionMode = false;
