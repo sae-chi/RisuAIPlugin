@@ -1,7 +1,7 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.11.1
+//@version 1.12.3
 //@arg summary_prompt string Default summary prompt
 
 (async () => {
@@ -18,6 +18,104 @@
     // Survives container close/reopen, but resets when the plugin/page reloads.
     const eventSessions = new Map()
     let unloaded = false
+    let managerOpen = false
+    let autoTimer = null
+    let autoPrompt = null
+    let observedCharacter = null
+    let observedChatIds = new Set()
+    const autoOptionKey = charId => 'memoryBank::autoLoad::' + charId
+
+    function isFreshChat(chat) {
+      return !!chat?.id && (chat.message ?? []).length === 0 &&
+        !chat.hypaV2Data && !chat.hypaV3Data
+    }
+
+    async function closeAutoPrompt() {
+      const prompt = autoPrompt
+      if (!prompt) return
+      autoPrompt = null
+      prompt.element.remove()
+      if (!managerOpen && !unloaded) await Risuai.hideContainer()
+    }
+
+    async function showAutoPrompt(char, chat, slots) {
+      if (unloaded || managerOpen || autoPrompt) return
+      const owner = ownerOf(char, chat, char.chatPage)
+      const element = document.createElement('div')
+      element.className = 'auto-memory-overlay'
+      element.innerHTML = getUIStyles() + '<section class="auto-memory-card" role="dialog" aria-modal="true" aria-labelledby="auto-memory-title" aria-describedby="auto-memory-description">' +
+        '<div class="auto-memory-heading"><div class="header-icon" aria-hidden="true">✨</div><div><h2 id="auto-memory-title">저장된 메모리를 불러올까요?</h2>' +
+        '<p class="auto-memory-context">' + esc(char.name || '캐릭터') + ' · 새 채팅</p></div></div>' +
+        '<p class="hint" id="auto-memory-description">새 채팅에 이어서 사용할 메모리 슬롯을 선택해 주세요.</p>' +
+        '<label class="auto-memory-field"><span class="section-title">메모리 슬롯</span><select id="auto-memory-slot">' +
+        slots.map(slot => '<option value="' + esc(slot.name) + '">' + esc(slot.name) + '</option>').join('') +
+        '</select></label><p id="auto-memory-status" class="msg-status" role="status"></p>' +
+        '<div class="auto-memory-actions"><button id="auto-memory-skip" class="btn btn-muted" type="button">건너뛰기</button><button id="auto-memory-load" class="btn btn-main" type="button">불러오기</button></div></section>'
+      // The manager is rebuilt on its next open; show only this prompt here.
+      document.body.replaceChildren(element)
+      const prompt = { element, owner, applying: false }
+      autoPrompt = prompt
+      const skip = element.querySelector('#auto-memory-skip')
+      const load = element.querySelector('#auto-memory-load')
+      skip.addEventListener('click', () => { closeAutoPrompt().catch(console.error) })
+      element.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && !prompt.applying) closeAutoPrompt().catch(console.error)
+        if (event.key === 'Tab') {
+          const controls = [...element.querySelectorAll('select,button')].filter(el => !el.disabled)
+          const first = controls[0], last = controls.at(-1)
+          if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+        }
+      })
+      load.addEventListener('click', async () => {
+        if (prompt.applying || autoPrompt !== prompt) return
+        prompt.applying = true
+        skip.disabled = load.disabled = true
+        try {
+          await loadSlot(owner.charId, element.querySelector('#auto-memory-slot').value, owner)
+          await closeAutoPrompt()
+        } catch (error) {
+          element.querySelector('#auto-memory-status').textContent = error.message
+        } finally {
+          prompt.applying = false
+          skip.disabled = load.disabled = false
+        }
+      })
+      try {
+        await Risuai.showContainer('fullscreen')
+        element.querySelector('select').focus()
+      } catch (error) { await closeAutoPrompt(); throw error }
+    }
+
+    async function pollNewChats() {
+      try {
+        const char = await Risuai.getCharacter()
+        if (unloaded) return
+        const chat = char?.chats?.[char.chatPage]
+        if (autoPrompt && !autoPrompt.applying &&
+          (char?.chaId !== autoPrompt.owner.charId || chat?.id !== autoPrompt.owner.chatId || !isFreshChat(chat))) {
+          await closeAutoPrompt()
+        }
+        if (!char?.chaId) { observedCharacter = null; observedChatIds.clear(); return }
+        const ids = new Set((char.chats ?? []).map(c => c.id).filter(Boolean))
+        const created = observedCharacter === char.chaId && chat?.id && !observedChatIds.has(chat.id)
+        // First observation and character switches establish a baseline, never prompt.
+        observedCharacter = char.chaId
+        observedChatIds = ids
+        if (!created || !isFreshChat(chat) || managerOpen || autoPrompt || manualBusy) return
+        if (await Risuai.pluginStorage.getItem(autoOptionKey(char.chaId)) !== '1') return
+        const slots = await getSlotList(char.chaId)
+        if (!slots.length) return
+        const live = await Risuai.getCharacter()
+        const liveChat = live?.chats?.[live.chatPage]
+        if (live?.chaId !== char.chaId || liveChat?.id !== chat.id || !isFreshChat(liveChat)) return
+        await showAutoPrompt(live, liveChat, slots)
+      } catch (error) {
+        console.warn('[Hypa Manager] 새 채팅 확인 실패:', error)
+      } finally {
+        if (!unloaded) autoTimer = setTimeout(pollNewChats, 1000)
+      }
+    }
 
     let manualBusy = false
     const memoryStamp = chat => JSON.stringify(chat.hypaV3Data ?? null)
@@ -528,13 +626,18 @@
       return data
     }
 
-    async function loadSlot(charId, name) {
+    async function loadSlot(charId, name, targetOwner = null) {
       if (manualBusy) throw new Error('요약 작업 종료 후 슬롯을 불러오세요.')
       manualBusy = true
       try {
         const data = await getSlotData(charId, name)
         if (!data) throw new Error('슬롯 데이터를 찾을 수 없습니다.')
-        const { char, charIndex, chatIndex, chat } = await getCharacterContext()
+        const { char, charIndex, chatIndex, chat } = targetOwner ? await resolveOwner(targetOwner) : await getCharacterContext()
+        if (targetOwner) {
+          const current = await Risuai.getCharacter()
+          if (current?.chaId !== targetOwner.charId || current.chats?.[current.chatPage]?.id !== targetOwner.chatId) throw new Error('대상 채팅이 변경되었습니다. 건너뛰기를 눌러 닫아 주세요.')
+          if (!isFreshChat(chat)) throw new Error('대화 또는 메모리가 이미 추가되어 자동 불러오기를 중단했습니다.')
+        }
         if (char.chaId !== charId) throw new Error('캐릭터가 변경되었습니다. 창을 다시 여세요.')
         chat.hypaV2Data = data.hypaV2Data
         chat.hypaV3Data = data.hypaV3Data
@@ -643,31 +746,8 @@
       bindSlotButtons(charId)
     }
 
-    function buildUI(messages, cfg, presets, slots, char, eventPrompt) {
-      const total = messages.length
-      const selectableTotal = messages.filter(m => m.role !== 'system').length
-      const modelLabel = String(cfg.modelLabel ?? '').replaceAll('pluginmodel:::', '')
-      const charName = char?.name || '캐릭터'
-
-      const msgRows = total === 0
-        ? '<div class="empty">메시지가 없습니다.</div>'
-        : messages.map((m, i) => {
-            const isSystem = m.role === 'system'
-            const isUser = m.role === 'user'
-            const role = m.isFirstMessage ? '첫 메시지' : (isSystem ? '시스템' : (isUser ? '사용자' : (m.name ?? '캐릭터')))
-            const text = typeof m.data === 'string' ? m.data : (m.data?.[0] ?? '')
-            const cls = isSystem ? 'msg-role-system' : (isUser ? 'msg-role-user' : 'msg-role-char')
-            const disabled = isSystem ? ' disabled' : ''
-            return '<div class="msg-row' + (m.isFirstMessage ? ' first-message' : '') + '" data-idx="' + i + '" tabindex="0" aria-haspopup="dialog" title="클릭해서 전문 보기">' +
-              '<input class="msg-check" type="checkbox" data-idx="' + i + '"' + disabled + '>' +
-              '<span class="msg-idx">' + i + '</span>' +
-              '<span class="' + cls + '">' + esc(role) + '</span>' +
-              '<span class="msg-text">' + esc(text) + '</span>' +
-            '</div>'
-          }).join('')
-
-      document.body.innerHTML =
-        '<style>' +
+    function getUIStyles() {
+      return '<style>' +
         /* ── 리셋 & 스크롤바 ── */
         '*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }' +
         '* { scrollbar-width: thin; scrollbar-color: rgba(100,180,210,.25) transparent; }' +
@@ -844,7 +924,48 @@
           '.msg-row { grid-template-columns: 16px 28px 54px 1fr; gap: 7px; }' +
           '.tab-btn { font-size: 12px; padding: 7px 12px; }' +
         '}' +
-        '</style>' +
+
+        '.auto-memory-overlay { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.56); }' +
+        '.auto-memory-card { width: min(440px,100%); min-width: 0; max-height: calc(100dvh - 40px); overflow-y: auto; padding: 24px; background: var(--c-bg); border: 1px solid var(--c-accent-border); border-radius: var(--radius-lg); box-shadow: var(--shadow-panel); display: flex; flex-direction: column; gap: 18px; }' +
+        '.auto-memory-heading { display: flex; align-items: center; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--c-border); }' +
+        '.auto-memory-heading > div:last-child { min-width: 0; }' +
+        '.auto-memory-heading h2 { font-size: 16px; font-weight: 600; line-height: 1.5; letter-spacing: -.02em; overflow-wrap: anywhere; }' +
+        '.auto-memory-context { margin-top: 4px; font-size: 11.5px; line-height: 1.6; color: var(--c-text-dim); overflow-wrap: anywhere; }' +
+        '.auto-memory-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }' +
+        '.auto-memory-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }' +
+        '.auto-memory-actions .btn { flex: 1; }' +
+        '.auto-memory-card .btn:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 3px; }' +
+        '#auto-memory-status { color: var(--c-danger); text-align: left; line-height: 1.6; overflow-wrap: anywhere; }' +
+        '#auto-memory-status:empty { display: none; }' +
+        '@media (max-width: 560px) { .auto-memory-card { padding: 20px 16px; } }' +
+        '</style>'
+    }
+
+    function buildUI(messages, cfg, presets, slots, char, eventPrompt) {
+      const total = messages.length
+      const selectableTotal = messages.filter(m => m.role !== 'system').length
+      const modelLabel = String(cfg.modelLabel ?? '').replaceAll('pluginmodel:::', '')
+      const charName = char?.name || '캐릭터'
+
+      const msgRows = total === 0
+        ? '<div class="empty">메시지가 없습니다.</div>'
+        : messages.map((m, i) => {
+            const isSystem = m.role === 'system'
+            const isUser = m.role === 'user'
+            const role = m.isFirstMessage ? '첫 메시지' : (isSystem ? '시스템' : (isUser ? '사용자' : (m.name ?? '캐릭터')))
+            const text = typeof m.data === 'string' ? m.data : (m.data?.[0] ?? '')
+            const cls = isSystem ? 'msg-role-system' : (isUser ? 'msg-role-user' : 'msg-role-char')
+            const disabled = isSystem ? ' disabled' : ''
+            return '<div class="msg-row' + (m.isFirstMessage ? ' first-message' : '') + '" data-idx="' + i + '" tabindex="0" aria-haspopup="dialog" title="클릭해서 전문 보기">' +
+              '<input class="msg-check" type="checkbox" data-idx="' + i + '"' + disabled + '>' +
+              '<span class="msg-idx">' + i + '</span>' +
+              '<span class="' + cls + '">' + esc(role) + '</span>' +
+              '<span class="msg-text">' + esc(text) + '</span>' +
+            '</div>'
+          }).join('')
+
+      document.body.innerHTML = getUIStyles() +
+
 
         '<dialog id="message-dialog" aria-labelledby="message-dialog-title">' +
           '<div class="message-dialog-header"><h2 id="message-dialog-title">메시지 전문</h2><button class="mini-btn" id="message-dialog-close" type="button" autofocus>닫기</button></div>' +
@@ -889,6 +1010,7 @@
           '</div>' +
 
           '<div id="tab-memory" class="tab-panel">' +
+            '<label class="event-option" style="margin-bottom:8px"><input type="checkbox" id="auto-memory-enabled" disabled>저장된 메모리 새 채팅에서 자동 불러오기</label><div class="hint">이 캐릭터에 적용됩니다. 새 빈 채팅에서 저장된 슬롯을 선택해 불러올지 한 번 묻습니다.</div>' +
             '<div class="slot-save"><input id="slot-name-input" type="text" maxlength="40" placeholder="메모리 슬롯 이름"><span class="hint" id="slot-count">' + slots.length + ' / ' + MAX_SLOTS + '</span><button class="btn btn-main" id="btn-save-slot" type="button">현재 메모리 저장</button></div>' +
             '<button class="btn btn-muted" id="import-legacy-slots">기존 이름 기반 슬롯 가져오기</button><div class="hint">슬롯은 캐릭터 고유 ID별로 저장됩니다. 같은 캐릭터의 채팅끼리 공유합니다.</div>' +
             '<div id="slot-list">' + renderSlotItems(slots) + '</div><div class="msg-status" id="memory-msg"></div>' +
@@ -958,6 +1080,7 @@
       let lastSummaryTarget = null
 
       document.getElementById('btn-close').addEventListener('click', () => {
+        managerOpen = false
         Risuai.hideContainer()
       })
       const panel = document.querySelector('.panel')
@@ -1407,6 +1530,21 @@
       document.getElementById('import-legacy-slots').addEventListener('click', async () => {
         try { await importLegacySlots(char) } catch (error) { showMsg('memory-msg', error.message, true) }
       })
+      const autoCheckbox = document.getElementById('auto-memory-enabled')
+      Risuai.pluginStorage.getItem(autoOptionKey(charId)).then(value => {
+        autoCheckbox.checked = value === '1'
+        autoCheckbox.disabled = false
+      }).catch(error => showMsg('memory-msg', '옵션 읽기 실패: ' + error.message, true))
+      autoCheckbox.addEventListener('change', async () => {
+        const enabled = autoCheckbox.checked
+        autoCheckbox.disabled = true
+        try {
+          await Risuai.pluginStorage.setItem(autoOptionKey(charId), enabled ? '1' : '0')
+        } catch (error) {
+          autoCheckbox.checked = !enabled
+          showMsg('memory-msg', '옵션 저장 실패: ' + error.message, true)
+        } finally { autoCheckbox.disabled = false }
+      })
       bindSlotButtons(charId)
       document.getElementById('btn-save-slot').addEventListener('click', async () => {
         const input = document.getElementById('slot-name-input')
@@ -1451,6 +1589,8 @@
     if (typeof Risuai.onUnload === 'function') {
       await Risuai.onUnload(async () => {
         unloaded = true
+        clearTimeout(autoTimer)
+        await closeAutoPrompt()
         eventSessions.clear()
         if (summaryBodyInterceptor?.id && typeof Risuai.unregisterBodyIntercepter === 'function') {
           try { await Risuai.unregisterBodyIntercepter(summaryBodyInterceptor.id) } catch {}
@@ -1461,6 +1601,8 @@
     await Risuai.registerButton(
       { name: 'Hypa Manager', icon: '✨️', iconType: 'html', location: 'chat', id: 'hypa-manager-chat' },
       async () => {
+        if (autoPrompt?.applying) return
+        await closeAutoPrompt()
         await promptSaveQueue
         const { char, chat, chatIndex } = await getCharacterContext()
         const charId = getCharId(char)
@@ -1474,10 +1616,12 @@
         buildUI(messages, cfg, presets, slots, char, eventPrompt)
         bindUI(messages, cfg, presets, char, chatIndex)
         await Risuai.showContainer('fullscreen')
+        managerOpen = true
       }
     )
 
-    console.log('[Hypa Manager] Plugin loaded v1.11.1')
+    await pollNewChats()
+    console.log('[Hypa Manager] Plugin loaded v1.12.2')
   } catch (error) {
     console.log('[Hypa Manager] Error: ' + error.message)
   }
