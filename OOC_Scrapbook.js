@@ -1,6 +1,6 @@
 //@name ooc_scrapbook
 //@api 3.0
-//@version 1.27.0
+//@version 1.27.1
 //@display-name OOC Scrapbook
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/OOC_Scrapbook.js
 
@@ -14,7 +14,7 @@
   }
 
   const PLUGIN_NAME = 'OOC Scrapbook';
-  const PLUGIN_VERSION = '1.27.0';
+  const PLUGIN_VERSION = '1.27.1';
   const DEFAULT_OOC_TEXT = '(ooc: pause the currently ongoing storyline. And write a complete episode based on the instructions given)';
   const STORAGE_KEY = 'ooc-scrapbook:data:v1';   // 예전 통짜 저장 키 (자동 이전 후 정리)
   const NOTES_KEY = 'ooc-scrapbook:notes:v1';    // 메모 본문 (용량의 99.9%)
@@ -1075,7 +1075,7 @@
         .memo-tabs-row.solo .memo-tab-add:hover { color: var(--accent-strong); border-color: var(--line-strong); background: var(--surface); }
         .note-paper { min-height: 330px; margin-top: 0; padding: 24px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); box-shadow: none; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.74; }
         .note-paper.placeholder { color: var(--muted); font-style: italic; }
-        .note-paper, .editor-textarea { font-size: 14.5px; }
+        .note-paper, .editor-textarea, .quick-body, .quick-composer textarea { font-size: 14.5px; }
         .note-paper.lang-en, .editor-textarea.lang-en { font-size: 14.5px; }
         .viewer-head, .viewer-tabs, .viewer-actions { flex: 0 0 auto; }
         .viewer-note { flex: 1 1 auto; min-height: 0; overflow: auto; }
