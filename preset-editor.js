@@ -1,10 +1,10 @@
 //@name preset_editor
 //@api 3.0
-//@version 0.8.0
+//@version 0.9.4
 //@display-name 프리셋 에디터
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/preset-editor.js
 
-/* Offline RisuAI preset migration. No database access, network, or model calls. */
+/* Offline RisuAI preset editing and reusable custom cards. No database access, network, or model calls. */
 (function () {
   'use strict';
   /* Bundled msgpackr 1.11.5 (index-no-eval):
@@ -575,18 +575,12 @@ return module.exports; })();
   // The UI below runs in the plugin's own iframe, or as an offline standalone HTML.
   startUI(Core).catch(e => { console.error(e); document.body.textContent = '에디터 시작 오류: ' + e.message; });
 
-  async function startUI(C) {
-    document.title = '프리셋 에디터';
-    document.documentElement.lang = 'ko';
-    const api = globalThis.Risuai || globalThis.risuai;
-    // Device-local preferences (theme). Falls back to localStorage outside RisuAI.
-    const pref = {
-      async get(key) { try { if (api?.safeLocalStorage) return await api.safeLocalStorage.getItem(key); } catch (_) { /* try localStorage */ } try { return localStorage.getItem(key); } catch (_) { return null; } },
-      async set(key, value) { try { if (api?.safeLocalStorage) { await api.safeLocalStorage.setItem(key, value); return; } } catch (_) { /* try localStorage */ } try { localStorage.setItem(key, value); } catch (_) { /* storage unavailable */ } }
-    };
+  function installEditorDesign() {
     const LIGHT = '--bg:#f4f2ec;--bg2:#ece9e0;--surface:#fffdf8;--surface2:#f3f0e8;--surface3:#e7e3d7;--line:#ddd8ca;--line2:#c2bba8;--text:#24221d;--muted:#5f5b50;--faint:#8a8576;' +
       '--accent:#a85a06;--accent-ink:#fff;--accent-soft:#a85a0618;--info:#2858b8;--info-soft:#2858b816;--ok:#18704b;--ok-soft:#18704b16;--danger:#b42b2b;--danger-soft:#b42b2b14;--shadow:0 12px 32px rgba(60,48,20,.18);--base:#8a8576';
+    if (document.getElementById('preset-editor-design')) return;
     const style = document.createElement('style');
+    style.id = 'preset-editor-design';
     style.textContent = `
       :root{color-scheme:dark;--bg:#111318;--bg2:#161920;--surface:#1b1e27;--surface2:#232734;--surface3:#2c3142;--line:#2c3140;--line2:#3f465c;--text:#eceae4;--muted:#a3a9bb;--faint:#8b91a6;
         --accent:#efb866;--accent-ink:#241802;--accent-soft:#efb86624;--info:#8cb5ff;--info-soft:#8cb5ff22;--ok:#72d6a9;--ok-soft:#72d6a922;--danger:#ff8e8e;--danger-soft:#ff8e8e22;--base:#8b91a6;
@@ -707,1248 +701,517 @@ return module.exports; })();
       @media (max-width:820px){.slots,.grid2,.editor-grid,.prompt-grid,.conflict-grid,.versions,.versions.has-base{grid-template-columns:1fr}.cindex{display:flex;flex-wrap:wrap;max-height:150px}.cidx{width:auto;max-width:100%}
         .topbar{padding:10px 14px}.stepbar{padding:0 14px}main{padding:16px 14px 90px}.brand p{display:none}.scroll,.prompt-pane-body{max-height:none}.card{padding:16px}.btn.lg{width:100%}}`;
     document.head.appendChild(style);
-    document.body.innerHTML = `
-      <div class="chrome">
-        <header class="topbar">
-          <div class="brand"><span class="mark" aria-hidden="true">✎</span><div><h1>프리셋 에디터</h1><p>내 커스텀을 새 버전 프리셋으로 옮겨 줘.</p></div></div>
-          <div class="top-actions">
-            <button id="open-library" class="btn" type="button" aria-haspopup="dialog">보관함 <span id="library-count" class="count" hidden></span></button>
-            <details id="project-menu" class="menu"><summary class="btn" aria-label="작업 저장 · 불러오기 메뉴">작업 ▾</summary>
-              <div class="menu-list">
-                <button id="save-project" class="menu-item" type="button">앱에 저장</button>
-                <button id="restore-project" class="menu-item" type="button">저장한 작업 불러오기</button>
-                <button id="export-project" class="menu-item" type="button">파일로 내보내기</button>
-                <button id="import-project" class="menu-item" type="button">파일에서 열기…</button>
-              </div></details>
-            <button id="theme" class="btn icon" type="button" aria-label="화면 테마 바꾸기" title="화면 테마 바꾸기">◐</button>
-            <button id="close" class="btn" type="button" hidden>닫기</button>
-          </div>
-        </header>
-        <div class="stepbar">
-          <div class="seg" role="group" aria-label="작업 종류"><button type="button" data-mode="preset" aria-pressed="true">프리셋 업데이트</button><button type="button" data-mode="toggle" aria-pressed="false" title="토글 정의만 새 버전으로 옮기거나 즐겨찾기를 새로 만들 때 써.">토글만 편집</button></div>
-          <nav id="steps" class="steps" role="tablist" aria-label="진행 단계"></nav>
-        </div>
-      </div>
-      <input id="project-file" type="file" accept=".json" hidden>
-      <main>
-        <section id="step-files" class="step-panel" role="tabpanel" aria-labelledby="tab-files">
-          <div id="files-preset" class="stack">
-            <div class="card">
-              <div class="card-head"><div><h2>파일 불러오기</h2><p class="lead">내가 고친 프리셋과 새로 나온 원본을 열어 줘. RisuAI에서 내보낸 .risup · .risupreset 파일을 그대로 쓸 수 있어.</p></div></div>
-              <div class="archive-bar"><label class="field"><span>보관함에서 이어서 작업</span><select id="release-select"></select></label><button id="load-stored-presets" class="btn" type="button">보관한 파일 불러오기</button></div>
-              <p id="release-status" class="hint" role="status" style="margin-top:8px"></p>
-              <div id="preset-slots" class="slots"></div>
-              <div class="baseline"><div class="grow"><span class="eyebrow">이번 비교 기준 원본</span><strong id="baseline-name"></strong><p id="baseline-help" class="hint"></p><p id="baseline-next" class="hint" hidden></p></div><span id="baseline-origin" class="badge" hidden></span><button id="baseline-view" class="btn sm" type="button" disabled>기준 원본 보기</button></div>
-              <details id="preset-options" class="advanced"><summary>고급 옵션</summary>
-                <div class="adv-body">
-                  <div id="preset-base-input"></div>
-                  <div class="grid2"><label class="field"><span>내 즐겨찾기 그룹 (자동 감지)</span><select id="preset-fav"></select></label>
-                    <div class="checks"><label class="check"><input id="preset-keep" type="checkbox"><span>원래 그룹에도 즐겨찾기 남기기</span></label><label class="check"><input id="preserve-settings" type="checkbox"><span>모델·생성 설정의 커스텀 변경도 병합</span></label></div></div>
-                  <label class="field"><span>토글 키 이름이 바뀐 경우 · 옛키=새키 (한 줄에 하나)</span><textarea id="preset-aliases" rows="3" placeholder="old_ooc=new_ooc"></textarea></label>
-                </div></details>
-            </div>
-            <div class="actionbar"><span id="files-hint" class="hint" role="status"></span><button id="run-preset" class="btn primary lg" type="button">프리셋 병합하기</button></div>
-          </div>
-          <div id="files-toggle" class="stack" hidden>
-            <div class="card">
-              <div class="card-head"><div><h2>토글 불러오기</h2><p class="lead">내 토글 · 즐겨찾기와 새 원본의 토글을 열어 줘. 내 토글을 비워 두면 새 원본에서 즐겨찾기를 처음부터 만들 수 있어. 프리셋 파일(.risup)이면 결과도 .risup으로, 텍스트만 쓰면 .txt로 저장해.</p></div></div>
-              <div class="archive-bar"><label class="field"><span>보관함에서 이어서 작업</span><select id="toggle-release-select"></select></label><button id="load-stored-toggles" class="btn" type="button">보관한 토글 불러오기</button></div>
-              <p id="toggle-release-status" class="hint" role="status" style="margin-top:8px"></p>
-              <div id="toggle-slots" class="slots"></div>
-              <details id="toggle-options" class="advanced"><summary>고급 옵션</summary>
-                <div class="adv-body">
-                  <div id="toggle-base-input"></div>
-                  <div class="grid2"><label class="field"><span>내 즐겨찾기 그룹 (자동 감지)</span><select id="toggle-fav"></select></label><div class="checks"><label class="check"><input id="toggle-keep" type="checkbox"><span>원래 그룹에도 즐겨찾기 남기기</span></label></div></div>
-                  <label class="field"><span>토글 키 이름이 바뀐 경우 · 옛키=새키 (한 줄에 하나)</span><textarea id="toggle-aliases" rows="3" placeholder="old_ooc=new_ooc"></textarea></label>
-                  <div><button id="from-presets" class="btn sm" type="button">프리셋 업데이트에 불러온 파일에서 가져오기</button></div>
-                </div></details>
-            </div>
-            <div class="actionbar"><span id="toggle-hint" class="hint" role="status"></span><button id="run-toggle" class="btn primary lg" type="button">토글 편집하기</button></div>
-          </div>
-        </section>
-        <section id="step-conflicts" class="step-panel" role="tabpanel" aria-labelledby="tab-conflicts" hidden>
-          <div class="card">
-            <div class="card-head"><div><h2>충돌 해결</h2><p id="conflicts-progress" class="lead"></p></div><div class="row"><button id="all-local" class="btn sm" type="button">전부 내 커스텀본으로</button><button id="all-latest" class="btn sm" type="button">전부 새 원본으로</button></div></div>
-            <div class="conflict-grid"><nav id="conflict-index" class="cindex" aria-label="충돌 항목"></nav><div id="conflicts-list"></div></div>
-          </div>
-        </section>
-        <section id="step-prompts" class="step-panel" role="tabpanel" aria-labelledby="tab-prompts" hidden>
-          <div class="card">
-            <div class="card-head"><div><h2>프롬프트 비교 · 편집</h2><p id="prompt-summary" class="lead"></p></div>
-              <div class="viewer-tools"><label>글자 크기 <select id="prompt-font" aria-label="뷰어 글자 크기"><option value="13">13px</option><option value="14" selected>14px</option><option value="16">16px</option><option value="18">18px</option></select></label><label><input id="prompt-wrap" type="checkbox" checked>줄바꿈</label></div></div>
-            <p id="prompt-edit-status" class="status-line" role="status"></p>
-            <div class="prompt-grid">
-              <aside class="prompt-sidebar"><input id="prompt-search" type="search" placeholder="이름 · 본문 검색" aria-label="프롬프트 검색"><nav id="prompt-nav" class="prompt-nav" aria-label="프롬프트 항목"></nav></aside>
-              <section class="prompt-pane" aria-label="참조 프리셋"><div class="prompt-pane-head"><div class="row"><h3><span class="tag theirs">참조</span></h3><select id="prompt-reference-source" aria-label="참조 프리셋 선택"><option value="latest">새 원본</option><option value="local">내 커스텀본</option><option value="base">비교 기준 원본</option></select></div><p id="prompt-reference-name" class="hint"></p></div><div id="prompt-reference-body" class="prompt-pane-body"></div></section>
-              <section class="prompt-pane" aria-label="작업 중"><div class="prompt-pane-head"><div class="row"><h3><span class="tag mine" id="prompt-work-title">내 커스텀본</span></h3><button id="prompt-reset" class="btn sm" type="button" disabled>이 항목 되돌리기</button></div><p id="prompt-work-name" class="hint"></p></div><div id="prompt-work-body" class="prompt-pane-body"></div></section>
-            </div>
-          </div>
-        </section>
-        <section id="step-toggles" class="step-panel" role="tabpanel" aria-labelledby="tab-toggles" hidden>
-          <div class="card">
-            <div class="card-head"><div><h2>토글 즐겨찾기 · 배치</h2><p class="lead">왼쪽 카탈로그에서 토글을 담고, 오른쪽에서 그룹과 순서를 정해. 끌어다 놓거나 버튼으로 옮길 수 있어. ★ 표시한 그룹이 즐겨찾기야.</p></div><span id="toggle-count" class="badge"></span></div>
-            <div id="warnings" class="stack" style="margin-bottom:12px"></div>
-            <div class="editor-grid">
-              <div class="pane"><h3>토글 카탈로그</h3>
-                <div class="toolbar"><input id="search" type="search" placeholder="키 · 라벨 · 선택지 검색" aria-label="토글 검색"><select id="filter" aria-label="카탈로그 필터"><option value="all">전체</option><option value="fav">즐겨찾기만</option><option value="other">안 담은 것만</option></select></div>
-                <div class="toolbar"><button id="add-selected" class="btn sm" type="button">체크한 토글 담기</button><button id="add-new" class="btn sm" type="button">신규 토글 모두 담기</button><button id="remove-missing" class="btn sm danger" type="button">새 원본에 없는 토글 제거</button></div>
-                <div id="catalog" class="scroll"></div></div>
-              <div class="pane"><div class="row spread"><h3>결과 배치</h3><button id="add-group" class="btn sm" type="button">+ 그룹 추가</button></div><div id="groups" class="scroll"></div></div>
-            </div>
-            <details class="advanced"><summary>토글 텍스트 직접 편집</summary><div class="adv-body"><textarea id="toggle-draft" aria-label="결과 토글 텍스트" rows="10"></textarea><div><button id="apply-toggle-text" class="btn sm" type="button">편집한 텍스트 적용</button></div></div></details>
-          </div>
-        </section>
-        <section id="step-save" class="step-panel" role="tabpanel" aria-labelledby="tab-save" hidden>
-          <div class="card">
-            <div class="card-head"><div><h2 id="save-title">저장</h2><p id="save-lead" class="lead"></p></div></div>
-            <ul id="checklist" class="checklist"></ul>
-            <div id="save-names" class="grid2" style="margin-bottom:16px"><label class="field"><span>결과 프리셋 이름</span><input id="preset-name" type="text" placeholder="새 원본 이름 · 커스텀 편집"></label><label class="field"><span>보관함 이름 (프리셋 종류별로 구분)</span><input id="release-label" type="text" placeholder="비워 두면 프리셋 이름을 써"></label></div>
-            <div class="actionbar"><button id="copy-output" class="btn" type="button">토글 텍스트 복사</button><button id="download-output" class="btn primary lg" type="button">저장</button></div>
-            <textarea id="output" readonly hidden aria-label="완성 토글 텍스트"></textarea>
-            <p id="output-help" class="hint" style="margin-top:12px"></p>
-          </div>
-          <div class="card" id="report-panel"><details><summary id="report-title" class="report-sum">변경 내역 대조</summary><div id="report" class="report"></div></details></div>
-          <div class="actionbar"><button id="next-update" class="btn" type="button">다음 업데이트 준비</button></div>
-        </section>
-        <div id="stepnav" class="stepnav"></div>
-      </main>
-      <div id="toasts" class="toasts" popover="manual"></div>
-      <dialog id="dlg" class="modal" aria-labelledby="dlg-title"></dialog>
-      <dialog id="library" class="drawer" aria-labelledby="library-title">
-        <div class="drawer-head"><div><h2 id="library-title">보관함</h2><p id="library-status" class="hint" role="status"></p></div><div class="row"><button id="reload-releases" class="btn sm" type="button">새로고침</button><button id="library-close" class="btn ghost sm icon" type="button" aria-label="보관함 닫기">✕</button></div></div>
-        <div class="drawer-body">
-          <p class="lead" style="margin:0">프리셋을 종류별로 보관해 두면 다음 업데이트 때 자동으로 비교 기준이 돼. 완성본을 저장하면 기준 원본은 새 원본으로 자동 교체돼.</p>
-          <p id="library-note" class="note" role="status" hidden></p>
-          <div id="library-list" class="stack"></div>
-          <details id="library-add" class="advanced"><summary>프리셋 파일 직접 보관하기</summary>
-            <div class="adv-body">
-              <div class="grid2"><label class="field"><span>보관 항목</span><select id="library-select"></select></label><label class="field"><span>보관 이름</span><input id="library-label" type="text" placeholder="프리셋 종류별 이름"></label></div>
-              <label class="field"><span>파일 종류</span><select id="library-role"><option value="base">비교 기준 원본 · 처음 등록</option><option value="personal">내 커스텀본 · 즐겨찾기</option><option value="latest">새 원본 · 편집 대기</option></select></label>
-              <div id="library-inputs"></div>
-              <div><button id="store-library" class="btn primary" type="button">보관하기</button></div>
-            </div></details>
-        </div>
-      </dialog>`;
-    const $ = id => document.getElementById(id);
-    const el = (tag, text, className) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (className) e.className = className; return e; };
-    const button = (text, fn, className = 'btn sm') => { const b = el('button', text, className); b.type = 'button'; b.addEventListener('click', fn); return b; };
-    const reduceMotion = () => !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    const inputIds = ['preset-base', 'preset-local', 'preset-latest', 'toggle-base', 'toggle-local', 'toggle-latest'];
-    const optionIds = ['preset-fav', 'preset-keep', 'preserve-settings', 'preset-name', 'preset-aliases', 'toggle-fav', 'toggle-keep', 'toggle-aliases'];
-    const fresh = () => ({ choices: {}, current: null, groups: [], catalog: new Map(), homes: new Map(), favoriteUid: '', selected: new Set(), collapsed: new Set(), manual: false, stale: false, promptDraft: null, conflictId: '', conflictDrafts: {} });
-    const state = { mode: 'preset', step: { preset: 'files', toggle: 'files' }, work: { preset: fresh(), toggle: fresh() }, drag: null, exporting: false,
-      archive: { type: 'risu-preset-release-archive', version: 1, activeId: '', entries: [] }, baseline: null, toggleBaseline: null, filePresets: {}, archiveLoaded: false, archiveAvailable: false, nextBaseline: null, nextToggleBaseline: null, storing: false, toggleBaseManaged: false };
-    const promptView = { key: '', source: 'latest' };
-    const STEP_LABEL = { files: '파일', conflicts: '충돌', prompts: '프롬프트', toggles: '토글', save: '저장' };
-    const stepsFor = mode => mode === 'preset' ? ['files', 'conflicts', 'prompts', 'toggles', 'save'] : ['files', 'conflicts', 'toggles', 'save'];
-    const active = () => state.work[state.mode] || fresh();
-    const unresolved = () => active().current?.conflicts.filter(c => !c.resolved).length || 0;
-    const merged = () => !!active().current && !active().stale;
-    const ready = () => merged() && !unresolved();
-    const guard = fn => async (...args) => { try { await fn(...args); } catch (e) { console.error(e); notify(e.message, 'error'); } };
-    const modeOf = id => id.startsWith('preset') || id === 'preserve-settings' ? 'preset' : id.startsWith('toggle') ? 'toggle' : 'library';
+  }
 
-    // ---- Feedback: toasts, modal dialogs, popover menus -------------------------------------
-    function notify(text, type = '') {
-      if (!text) return;
-      const root = $('toasts'), toast = el('div', null, 'toast ' + type);
-      toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
-      const close = button('✕', () => toast.remove(), 'btn ghost sm icon'); close.setAttribute('aria-label', '알림 닫기');
-      toast.append(el('span', text, 'toast-text'), close); root.append(toast);
-      while (root.children.length > 3) root.firstElementChild.remove();
-      // Re-show so the toast stacks above any open modal (e.g. the library drawer).
-      try { if (root.showPopover) { if (root.matches(':popover-open')) root.hidePopover(); root.showPopover(); } } catch (_) { /* popover unsupported */ }
-      if ($('library').open) { const note = $('library-note'); note.textContent = text; note.hidden = false; note.dataset.type = type; }
-      if (type !== 'error') setTimeout(() => toast.remove(), type === 'ok' ? 5000 : 7000);
+  // Single-preset workspace. Cards store content only; placement belongs to this document.
+  async function startUI(C) {
+    if (!document.body) await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once: true }));
+    document.title = '프리셋 에디터';
+    document.documentElement.lang = 'ko';
+    installEditorDesign();
+    const api = globalThis.Risuai || globalThis.risuai;
+    const storage = {
+      get: key => api ? api.pluginStorage.getItem(key) : Promise.resolve(localStorage.getItem(key)),
+      set: (key, value) => api ? api.pluginStorage.setItem(key, value) : Promise.resolve(localStorage.setItem(key, value))
+    };
+    const CARD_KEY = 'preset-editor:custom-cards:v1';
+    const uid = () => globalThis.crypto?.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2);
+    const state = { tab: 'edit', original: null, draft: null, meta: [], selected: '', editing: '', fileName: '',
+      history: [], future: [], historyGroup: '', saved: '', cards: [], cardsReady: false, cardBusy: false,
+      cardId: '', cardBefore: '', cardMessage: '', cardError: false, cardSettings: { type: 'plain', type2: 'normal', role: 'system' }, drag: null, gap: null, busy: false, panel: true };
+    const el = (tag, text, cls) => { const node = document.createElement(tag); if (text != null) node.textContent = text; if (cls) node.className = cls; return node; };
+    const $ = id => root.querySelector('#pe-' + id);
+    const btn = (label, fn, cls = 'btn sm') => { const b = el('button', label, cls); b.type = 'button'; b.addEventListener('click', guard(fn)); return b; };
+    const guard = fn => async (...args) => { try { await fn(...args); } catch (e) { console.error(e); notify(e.message, true); } };
+    const labels = { plain: '순수 프롬프트', jailbreak: '추가 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
+      persona: '페르소나', description: '캐릭터 설명', lorebook: '로어북', chat: '챗', authornote: '작가의 노트',
+      memory: '장기 기억', postEverything: '최종 삽입 프롬프트', cache: '캐시 포인트', mainPrompt: '메인 프롬프트', globalNote: '글로벌 노트',
+      customPromptTemplateToggle: '토글 정의', templateDefaultVariables: '기본 변수', JinjaTemplate: 'Jinja 템플릿', instructChatTemplate: '인스트럭트 템플릿', formatingOrder: '기본 프롬프트 순서' };
+    const textKeys = ['text', 'innerFormat', 'defaultText'];
+    const promptTypes = ['plain', 'jailbreak', 'cot', 'chatML', 'persona', 'description', 'lorebook', 'chat', 'authornote', 'memory', 'postEverything', 'cache'];
+    const specialTypes = { normal: '일반', main: '메인 프롬프트', globalNote: '글로벌 노트' };
+    const plainTypes = ['plain', 'jailbreak', 'cot'];
+    const formatTypes = ['persona', 'description', 'lorebook', 'memory', 'authornote', 'postEverything'];
+    const roles = { system: '시스템', user: '유저', bot: '캐릭터' };
+    const cardUsesText = type => !['chat', 'cache'].includes(type);
+    function cardSettings(card = {}) {
+      const type = card.type ?? 'plain', type2 = card.type2 ?? 'normal';
+      let role = card.role ?? (formatTypes.includes(type) ? '' : type === 'cache' ? 'all' : 'system');
+      if (type === 'cache') role = ['bot', 'char'].includes(role) ? 'assistant' : role || 'all';
+      else { if (['assistant', 'char'].includes(role)) role = 'bot'; if (role === 'all' || (!role && plainTypes.includes(type))) role = 'system'; }
+      return { type, type2, role };
     }
-    // window.confirm/prompt can be blocked inside a sandboxed iframe, so use an in-page <dialog>.
-    function openDialog({ title, message, confirmText = '확인', danger = false, field = null }) {
+    function cardFromBlock(block) {
+      return { name: titleOf(block), text: bodyOf(block), ...cardSettings({ type: block.type, type2: block.type2,
+        role: formatTypes.includes(block.type) ? block.role2 ?? '' : block.role }) };
+    }
+    function blockFromCard(card) {
+      const settings = cardSettings(card), block = { type: settings.type, name: card.name };
+      if (plainTypes.includes(block.type)) Object.assign(block, { text: card.text, type2: settings.type2, role: settings.role });
+      else if (formatTypes.includes(block.type)) { block.innerFormat = card.text; if (settings.role) block.role2 = settings.role; }
+      else if (block.type === 'chatML') block.text = card.text;
+      else if (block.type === 'cache') block.role = settings.role;
+      else if (block.type !== 'chat') Object.assign(block, { text: card.text, role: settings.role });
+      setPromptType(block, block.type); return block;
+    }
+    const titleOf = block => block.name || labels[block.type] || block.type;
+    const bodyOf = block => {
+      const keys = plainTypes.includes(block.type) || block.type === 'chatML' ? ['text'] : formatTypes.includes(block.type) ? ['innerFormat', ...(block.type === 'authornote' ? ['defaultText'] : [])] : promptTypes.includes(block.type) ? [] : textKeys;
+      return keys.filter(key => typeof block[key] === 'string' && block[key]).map(key => block[key]).join('\n\n');
+    };
+    const css = el('style');
+    css.textContent = `
+      .pe-tabs{display:flex;gap:8px}.pe-tabs .step{min-height:46px}.pe-top main{padding-bottom:24px}
+      .pe-main{max-width:1440px}.pe-welcome{max-width:720px;margin:42px auto;width:100%;padding:32px}.pe-welcome .drop{margin:22px 0;padding:48px 20px}
+      .pe-heading{margin-bottom:16px}.pe-heading input{font-size:18px;font-weight:700;max-width:520px}
+      .pe-workspace{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:18px;align-items:start}.pe-workspace.no-library{grid-template-columns:minmax(0,1fr)}
+      .pe-document{min-width:0}.pe-blocks{position:relative;max-height:calc(100dvh - 290px);min-height:240px;overflow:auto;padding:2px 8px 12px 2px;overscroll-behavior:contain}
+      .pe-block{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden;min-width:0;transition:border-color .15s}
+      .pe-block.selected{border-color:var(--info)}.pe-block.custom{border-left:3px solid var(--accent)}
+      .pe-block-head{display:flex;align-items:center;gap:6px;padding:10px 12px;background:var(--surface2);flex-wrap:wrap}
+      .pe-block-title{border:0;background:transparent;padding:2px 4px;text-align:left;font-weight:650;overflow-wrap:anywhere;white-space:normal;flex:1;min-width:100px}
+      .pe-block-text{margin:0;padding:14px 16px;white-space:pre-wrap;overflow-wrap:anywhere;font:var(--prompt-font)/1.8 var(--mono);max-height:270px;overflow:auto}
+      .pe-block-meta{padding:8px 14px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.pe-block.collapsed .pe-block-text,.pe-block.collapsed .pe-block-meta,.pe-block.editing .pe-block-text,.pe-block.editing .pe-block-meta{display:none}
+      .pe-grip{cursor:grab;touch-action:none;color:var(--faint);font-size:18px}.pe-grip:active{cursor:grabbing}.pe-dragging{opacity:.45}
+      .pe-gap{height:12px;position:relative;transition:height .1s}.pe-gap.active{height:40px;background:var(--accent-soft);border-radius:8px}
+      .pe-gap.active::after{content:'여기에 삽입';position:absolute;inset:0;display:grid;place-items:center;color:var(--accent);font-size:12px;border:1px dashed var(--accent);border-radius:8px}
+      .pe-block-editor{display:grid;gap:12px;padding:16px;border-top:1px solid var(--line)}.pe-block-editor textarea{min-height:220px;font-size:var(--prompt-font)}
+      .pe-side{position:sticky;top:126px;padding:16px}.pe-side .card-head{margin-bottom:10px}.pe-card-list{display:grid;gap:10px;margin-top:12px;align-content:start}
+      .pe-side .pe-card-list{max-height:calc(100dvh - 340px);overflow:auto;padding:2px}.pe-snippet{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg2);min-width:0}
+      .pe-snippet[draggable=true]{cursor:grab}.pe-snippet:hover{border-color:var(--line2)}.pe-snippet h3{overflow-wrap:anywhere}.pe-snippet pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 var(--mono);color:var(--muted);margin:8px 0;max-height:100px;overflow:auto}
+      .pe-manager{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,1fr);gap:18px;align-items:start}.pe-card-form{position:sticky;top:126px;display:grid;gap:14px}.pe-card-form textarea{min-height:330px;font-size:14px}
+      .pe-preview{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.8 var(--mono);padding:14px;border:1px solid var(--line);border-radius:9px;background:var(--bg2);max-height:300px;overflow:auto;margin:0}
+      .pe-status{min-height:20px;color:var(--muted);font-size:12.5px}.pe-fields{padding:0 16px}.pe-fields textarea{min-height:320px}.pe-fields>summary{padding:10px 0;color:var(--muted);font-weight:650}.pe-fields[open]{padding-bottom:16px}.pe-fields[open] .stack{padding-top:8px}
+      #pe-card-draft-status:empty{display:none}#pe-card-draft-status[data-error=true]{color:var(--danger)}
+      .pe-dialog-body{display:grid;gap:14px;padding:22px}
+      .pe-blocks:empty::before{content:'블록이 없어. 커스텀 카드를 여기로 드래그해서 첫 블록을 추가해.';display:block;padding:50px 20px;text-align:center;color:var(--muted)}
+      .pe-feedback{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);width:min(580px,calc(100vw - 24px));z-index:90}.pe-feedback:empty{display:none}
+      @media(max-width:1000px){.pe-workspace{grid-template-columns:minmax(0,1fr) 270px}.pe-manager{grid-template-columns:minmax(0,1fr) minmax(300px,1fr)}}
+      @media(max-width:760px){.pe-workspace,.pe-manager{grid-template-columns:minmax(0,1fr)}.pe-side,.pe-card-form{position:static}.pe-side .pe-card-list{max-height:330px}.pe-blocks{max-height:65dvh}.pe-welcome{margin:16px auto;padding:22px}.pe-tabs{gap:0}.pe-top .top-actions{gap:3px}.pe-top .top-actions .btn{padding:5px 8px}}
+    `;
+    document.head.appendChild(css);
+    const root = el('div', null, 'pe-top');
+    root.innerHTML = `
+      <div class="chrome"><header class="topbar"><div class="brand"><span class="mark" aria-hidden="true">✎</span><div><h1>프리셋 에디터</h1></div></div>
+        <div class="top-actions"><button id="pe-theme" type="button" class="btn icon" aria-label="화면 테마 바꾸기">◐</button><button id="pe-close" type="button" class="btn" hidden>닫기</button></div></header>
+        <div class="stepbar"><nav class="pe-tabs" role="tablist" aria-label="에디터 화면"><button id="pe-tab-edit" type="button" class="step" role="tab" aria-controls="pe-edit" aria-selected="true">프리셋 편집</button><button id="pe-tab-cards" type="button" class="step" role="tab" aria-controls="pe-cards" aria-selected="false" tabindex="-1">커스텀 보관함 <span id="pe-card-count" class="count">0</span></button></nav></div></div>
+      <main class="pe-main">
+        <section id="pe-edit" role="tabpanel" aria-labelledby="pe-tab-edit">
+          <div id="pe-welcome" class="card pe-welcome"><h2>프리셋 파일 열기</h2><button id="pe-open-empty" class="drop" type="button"><small>여기로 드래그하거나 클릭해서 선택 · .risup · .risupreset · .json</small></button></div>
+          <div id="pe-loaded" hidden>
+            <div class="card pe-heading"><div class="row spread"><label class="field grow"><span>결과 프리셋 이름</span><input id="pe-name" type="text" aria-label="결과 프리셋 이름"></label><div class="row"><button id="pe-undo" type="button" class="btn sm" disabled>↶ 실행 취소</button><button id="pe-redo" type="button" class="btn sm" disabled>↷ 다시 실행</button><button id="pe-download" type="button" class="btn primary">완성 프리셋 다운로드</button></div></div>
+              <div class="row spread" style="margin-top:10px"><p id="pe-preset-status" class="pe-status" role="status"></p><button id="pe-toggle-panel" class="btn sm" type="button" aria-expanded="true" aria-controls="pe-sidebar">보관함 접기</button></div>
+            </div>
+            <div id="pe-workspace" class="pe-workspace"><div class="pe-document"><div class="row spread" style="margin-bottom:10px"><h2>프리셋 블록 <span id="pe-block-count" class="badge"></span></h2><div class="viewer-tools"><button id="pe-add-block" type="button" class="btn sm">＋ 새 블록 추가</button><label>글자 크기 <select id="pe-font"><option value="13">13px</option><option value="14" selected>14px</option><option value="16">16px</option><option value="18">18px</option></select></label><button id="pe-fold-all" type="button" class="btn ghost sm">모두 접기</button><button id="pe-unfold-all" type="button" class="btn ghost sm">모두 펼치기</button></div></div><p id="pe-block-help" class="hint" style="margin-bottom:10px"></p><div id="pe-blocks" class="pe-blocks" aria-label="프리셋 블록 목록"></div><details class="card pe-fields" style="margin-top:14px"><summary>토글 편집</summary><div id="pe-fields" class="stack"></div></details></div>
+              <aside id="pe-sidebar" class="card pe-side" aria-label="커스텀 카드 보관함"><div class="card-head"><div><h2>커스텀 보관함</h2><p class="hint">카드를 블록 사이로 드래그해.</p></div></div><div class="row"><input id="pe-side-search" type="search" placeholder="이름 · 본문 검색" aria-label="삽입할 카드 검색"></div><div class="row" style="margin-top:8px"><button id="pe-manage-cards" type="button" class="btn sm">카드 관리</button><button id="pe-new-side" type="button" class="btn ghost sm">＋ 카드 작성</button></div><div id="pe-side-list" class="pe-card-list"></div></aside>
+            </div>
+          </div>
+        </section>
+        <section id="pe-cards" role="tabpanel" aria-labelledby="pe-tab-cards" hidden><div class="card-head"><div><h2>커스텀 카드 보관함</h2><p class="lead">자주 쓰는 구문을 저장해.</p></div><button id="pe-new-card" type="button" class="btn primary">＋ 새 카드</button></div><div class="pe-manager" style="margin-top:14px"><div class="card"><input id="pe-card-search" type="search" placeholder="이름 · 본문 검색" aria-label="보관한 카드 검색"><div id="pe-card-list" class="pe-card-list"></div></div>
+          <div id="pe-card-form" class="card pe-card-form"><h3 id="pe-form-title">새 커스텀 카드</h3><label class="field"><span>카드 이름</span><input id="pe-card-name" type="text" maxlength="200" placeholder="예: 서술 스타일"></label><div id="pe-card-options" class="grid2"></div><label id="pe-card-text-field" class="field"><span>커스텀 구문</span><textarea id="pe-card-text" spellcheck="false" placeholder="프리셋에 추가할 구문을 입력해."></textarea></label><div class="actionbar"><button id="pe-card-save" type="button" class="btn primary">카드 저장</button></div><p id="pe-card-draft-status" class="hint" role="status"></p></div></div>
+        </section>
+      </main><input id="pe-file" type="file" accept=".risup,.risupreset,.json,.preset" hidden><div id="pe-feedback" class="pe-feedback" aria-live="polite"></div><dialog id="pe-dialog" class="modal"></dialog>`;
+    document.body.replaceChildren(root);
+    const collapsed = new Set();
+    let feedbackTimer, autoScrollFrame = 0, scrollPointer = null;
+    function notify(message, error = false) {
+      const box = el('div', null, 'toast ' + (error ? 'error' : 'ok'));
+      box.setAttribute('role', error ? 'alert' : 'status'); box.append(el('span', message, 'toast-text'), btn('✕', () => $('feedback').replaceChildren(), 'btn ghost sm icon'));
+      $('feedback').replaceChildren(box); clearTimeout(feedbackTimer);
+      if (!error) feedbackTimer = setTimeout(() => $('feedback')?.replaceChildren(), 6000);
+    }
+    function confirmAction(title, message, danger = false) {
       return new Promise(resolve => {
-        const d = $('dlg'), form = el('form'); d.replaceChildren(); d.returnValue = ''; form.method = 'dialog';
-        const heading = el('h2', title); heading.id = 'dlg-title'; form.append(heading);
-        if (message) form.append(el('p', message, 'lead'));
-        let input = null;
-        if (field) { const label = el('label', null, 'field'); input = el('input'); input.type = 'text'; input.value = field.value || ''; label.append(el('span', field.label), input); form.append(label); }
-        const cancel = button('취소', () => d.close('cancel'), 'btn'), ok = el('button', confirmText, 'btn ' + (danger ? 'danger-solid' : 'primary')); ok.type = 'submit';
-        const actions = el('div', null, 'dlg-actions'); actions.append(cancel, ok); form.append(actions);
-        form.addEventListener('submit', e => { e.preventDefault(); if (input && !input.value.trim()) { input.focus(); return; } d.close('ok'); });
-        d.append(form);
-        d.addEventListener('close', () => resolve(d.returnValue === 'ok' ? (input ? input.value.trim() : true) : (input ? null : false)), { once: true });
-        d.showModal(); (input || cancel).focus(); if (input) input.select();
+        const dialog = $('dialog'), form = el('div', null, 'pe-dialog-body'); dialog.returnValue = '';
+        const heading = el('h2', title); heading.id = 'pe-dialog-title'; dialog.setAttribute('aria-labelledby', heading.id);
+        form.append(heading, el('p', message, 'lead')); const actions = el('div', null, 'dlg-actions');
+        actions.append(btn('취소', () => dialog.close('cancel'), 'btn'));
+        const ok = btn(danger ? '진행' : '확인', () => dialog.close('ok'), 'btn ' + (danger ? 'danger-solid' : 'primary')); ok.dataset.confirm = 'true'; actions.append(ok); form.append(actions);
+        dialog.replaceChildren(form);
+        dialog.addEventListener('close', () => resolve(dialog.returnValue === 'ok'), { once: true }); dialog.showModal();
       });
     }
-    const canModal = () => typeof $('dlg').showModal === 'function';
-    const nativeConfirm = message => globalThis.confirm ? globalThis.confirm(message) : false;
-    const ask = (title, message, confirmText = '계속', danger = false) => canModal() ? openDialog({ title, message, confirmText, danger }).catch(() => nativeConfirm(message)) : Promise.resolve(nativeConfirm(message));
-    const askText = (title, label, value = '') => canModal() ? openDialog({ title, field: { label, value } }).catch(() => globalThis.prompt ? globalThis.prompt(label, value) : null) : Promise.resolve(globalThis.prompt ? globalThis.prompt(label, value) : null);
-    // The library drawer is a modal; close it while a confirm/prompt is shown so the two never stack.
-    async function outsideLibrary(fn) { const was = $('library').open; if (was) closeLibrary(); try { return await fn(); } finally { if (was) openLibrary(); } }
-    document.addEventListener('click', e => document.querySelectorAll('details.menu[open]').forEach(m => { if (!m.contains(e.target) || e.target.closest('.menu-list button')) m.removeAttribute('open'); }));
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('details.menu[open]').forEach(m => { m.removeAttribute('open'); m.querySelector('summary')?.focus(); }); });
-    function menu(label, items) {
-      const d = el('details', null, 'menu'), summary = el('summary', '⋯', 'btn ghost sm icon'), list = el('div', null, 'menu-list');
-      summary.setAttribute('aria-label', label);
-      items.forEach(item => { const b = button(item.text, item.fn, 'menu-item' + (item.danger ? ' danger' : '')); b.disabled = !!item.disabled; list.append(b); });
-      d.append(summary, list); return d;
+    function tab(name, focus = false) {
+      endDrag(); state.tab = name;
+      ['edit', 'cards'].forEach(key => { $(key).hidden = key !== name; $('tab-' + key).setAttribute('aria-selected', String(key === name)); $('tab-' + key).tabIndex = key === name ? 0 : -1; });
+      if (focus) $('tab-' + name).focus();
+      if (name === 'cards') renderCards();
     }
-
-    // ---- Theme -----------------------------------------------------------------------------
-    const applyTheme = theme => { if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme; else delete document.documentElement.dataset.theme; };
-    pref.get('preset-editor:theme').then(applyTheme);
-    $('theme').addEventListener('click', () => {
-      const systemDark = !globalThis.matchMedia || globalThis.matchMedia('(prefers-color-scheme: dark)').matches;
-      const next = (document.documentElement.dataset.theme || (systemDark ? 'dark' : 'light')) === 'dark' ? 'light' : 'dark';
-      applyTheme(next); pref.set('preset-editor:theme', next);
-    });
-
-    // ---- Steps -----------------------------------------------------------------------------
-    function stepEnabled(step) {
-      const w = active(), ok = merged();
-      if (step === 'files') return true;
-      if (step === 'conflicts') return ok && w.current.conflicts.length > 0;
-      if (step === 'prompts') return state.mode === 'preset' && (ok || ['local', 'latest', 'base'].some(inputPreset));
-      if (step === 'toggles') return ready();
-      if (step === 'save') return ok;
-      return false;
+    function snapshot() { return clone({ draft: state.draft, meta: state.meta, selected: state.selected }); }
+    function record(group = '') {
+      if (!group || group !== state.historyGroup) { state.history.push(snapshot()); if (state.history.length > 60) state.history.shift(); }
+      state.historyGroup = group; state.future = [];
     }
-    function goStep(step, focus = true) {
-      if (!stepEnabled(step)) return;
-      state.step[state.mode] = step; render();
-      if (!focus) return;
-      const heading = $('step-' + step).querySelector('h2'); if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
-      globalThis.scrollTo?.({ top: 0, behavior: reduceMotion() ? 'auto' : 'smooth' });
+    function change(fn, group = '', redraw = true) { if (!state.draft || state.busy) return; record(group); fn(); if (redraw) renderDocument(); else updateStatus(); }
+    function travel(from, to) { if (!from.length || state.busy) return; to.push(snapshot()); Object.assign(state, from.pop()); state.historyGroup = ''; state.editing = ''; renderDocument(); }
+    function isDirty() { return state.draft && !C.same(state.draft, state.original); }
+    function updateStatus() {
+      $('loaded').inert = state.busy; $('welcome').inert = state.busy;
+      $('undo').disabled = !state.history.length || state.busy; $('redo').disabled = !state.future.length || state.busy;
+      $('download').disabled = !state.draft || state.busy;
+      const blocks = state.draft?.promptTemplate;
+      $('add-block').disabled = !Array.isArray(blocks) || state.busy;
+      $('block-count').textContent = Array.isArray(blocks) ? blocks.length + '개' : '기본 형식';
+      $('preset-status').textContent = state.busy ? '파일을 처리하는 중이야…' : state.saved && C.same(state.draft, state.saved) ? '현재 내용으로 파일을 만들었어. RisuAI에서 프리셋을 가져와 적용해.' : (state.fileName ? state.fileName + ' · ' : '') + (isDirty() ? '편집한 내용이 있어.' : '프리셋을 불러왔어.');
+      $('toggle-panel').textContent = state.panel ? '보관함 접기' : '보관함 펼치기'; $('toggle-panel').setAttribute('aria-expanded', String(state.panel));
+      $('sidebar').hidden = !state.panel; $('workspace').classList.toggle('no-library', !state.panel);
     }
-    function renderChrome() {
-      document.querySelectorAll('[data-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === state.mode)));
-      const w = active(), cur = state.step[state.mode], root = $('steps'); root.replaceChildren();
-      stepsFor(state.mode).forEach((s, i) => {
-        const b = el('button', null, 'step'); b.type = 'button'; b.id = 'tab-' + s; b.dataset.step = s;
-        b.setAttribute('role', 'tab'); b.setAttribute('aria-selected', String(s === cur)); b.setAttribute('aria-controls', 'step-' + s); b.tabIndex = s === cur ? 0 : -1; b.disabled = !stepEnabled(s);
-        const done = s === 'files' ? merged() : s === 'conflicts' ? merged() && w.current.conflicts.length > 0 && !unresolved() : s === 'save' ? !!w.current?.savedRecord : false;
-        if (done) b.dataset.done = 'true';
-        b.append(el('span', done && s !== cur ? '✓' : String(i + 1), 'n'), el('span', STEP_LABEL[s]));
-        if (s === 'conflicts' && merged() && w.current.conflicts.length) { const n = unresolved(); b.append(el('span', n ? String(n) : '✓', 'count' + (n ? '' : ' ok'))); b.setAttribute('aria-label', '충돌, 미해결 ' + n + '개'); }
-        b.addEventListener('click', () => goStep(s)); root.append(b);
-      });
+    function inputField(labelText, value, apply, multiline = true) {
+      const label = el('label', null, 'field'), input = el(multiline ? 'textarea' : 'input');
+      if (!multiline) input.type = 'text'; input.value = value; input.spellcheck = false; input.setAttribute('aria-label', labelText);
+      label.append(el('span', labelText), input); input.addEventListener('input', () => apply(input.value));
+      input.addEventListener('blur', () => { state.historyGroup = ''; }); return label;
     }
-    $('steps').addEventListener('keydown', e => {
-      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-      const tabs = [...$('steps').querySelectorAll('.step:not(:disabled)')]; if (!tabs.length) return;
-      const i = tabs.indexOf(document.activeElement), next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-      e.preventDefault(); goStep(tabs[next].dataset.step, false); $('tab-' + tabs[next].dataset.step)?.focus();
-    });
-    function renderStepNav() {
-      const root = $('stepnav'), cur = state.step[state.mode]; root.replaceChildren();
-      const order = stepsFor(state.mode).filter(stepEnabled), i = order.indexOf(cur);
-      root.hidden = cur === 'files' || i < 0;
-      if (root.hidden) return;
-      if (i > 0) root.append(button('← ' + STEP_LABEL[order[i - 1]], () => goStep(order[i - 1]), 'btn'));
-      else root.append(el('span'));
-      if (i < order.length - 1) root.append(button('다음 · ' + STEP_LABEL[order[i + 1]] + ' →', () => goStep(order[i + 1]), 'btn primary'));
+    function selectField(labelText, options, value, apply) {
+      const label = el('label', null, 'field'), select = el('select'); select.setAttribute('aria-label', labelText);
+      Object.entries(options).forEach(([key, text]) => { const option = el('option', text); option.value = key; select.append(option); });
+      if (!own(options, value)) { const option = el('option', value || '(미지정)'); option.value = value; select.append(option); }
+      select.value = value; select.addEventListener('change', () => apply(select.value)); label.append(el('span', labelText), select); return label;
     }
-    function switchMode(mode) {
-      state.mode = mode; $('search').value = ''; $('filter').value = 'all'; render();
-    }
-    document.querySelectorAll('[data-mode]').forEach(b => b.addEventListener('click', () => switchMode(b.dataset.mode)));
-
-    function invalidate(mode) {
-      const w = state.work[mode]; if (!w) return;
-      const had = !!w.current;
-      w.stale = true; w.choices = {}; w.conflictId = ''; w.conflictDrafts = {};
-      if (state.mode === mode) { render(); if (had) notify('입력이 바뀌었어. 다시 병합해 줘.'); }
-    }
-    function updateFavoriteSelect(mode, remembered) {
-      const select = $(mode + '-fav');
-      if (!select) return;
-      const hadGroups = select.options.length > 1;
-      const previous = remembered == null ? select.value : remembered;
-      let groups = [];
-      try {
-        const text = mode === 'preset' ? C.parsePreset($('preset-local').value).customPromptTemplateToggle || '' : $('toggle-local').value;
-        groups = C.parseToggles(text);
-      } catch (_) { /* Invalid input is reported when the user runs migration. */ }
-      select.replaceChildren(); const none = el('option', '지정하지 않음'); none.value = '-1'; select.appendChild(none);
-      groups.forEach((g, i) => { const opt = el('option', (i + 1) + '. ' + (g.name || '그룹 밖') + ' (' + g.items.filter(it => it.type === 'item').length + ')'); opt.value = String(i); select.appendChild(opt); });
-      const recommended = groups.findIndex(g => /즐겨찾기|fav/i.test(g.name));
-      if ((remembered != null || hadGroups) && previous !== '' && [...select.options].some(o => o.value === String(previous))) select.value = String(previous);
-      else select.value = String(recommended);
-    }
-
-    // ---- Input slots (drop zone / paste area) ---------------------------------------------
-    function refreshSlot(id) {
-      const card = document.querySelector('[data-slot="' + id + '"]'); if (!card) return;
-      const filled = !!$(id).value.trim(), isPreset = id.startsWith('preset') || id === 'library-source';
-      card.classList.toggle('filled', filled);
-      card.querySelector('.clear').hidden = !filled;
-      if (!isPreset) return;
-      const overview = card.querySelector('.overview');
-      if (!filled) { overview.textContent = ''; return; }
-      try {
-        const preset = C.parsePreset($(id).value), toggles = C.parseToggles(preset.customPromptTemplateToggle || '');
-        overview.textContent = (preset.name || '이름 없는 프리셋') + ' · 프롬프트 블록 ' + (preset.promptTemplate?.length || 0) + '개 · 토글 ' + toggles.reduce((n, g) => n + g.items.filter(it => it.type === 'item').length, 0) + '개';
-      } catch (_) { overview.textContent = '프리셋 형식을 확인하고 파일을 다시 불러와 줘.'; }
-    }
-    function makeInput(parent, id, { title, tone = '', optional = false, hint = '' }) {
-      const isPreset = id.startsWith('preset') || id === 'library-source';
-      const card = el('section', null, 'slot'); card.dataset.slot = id;
-      const head = el('div', null, 'slot-head'); head.append(el('h3', title, 'tag ' + tone)); if (optional) head.append(el('span', '선택', 'badge'));
-      card.append(head); if (hint) card.append(el('p', hint, 'hint'));
-      const file = el('input'); file.type = 'file'; file.hidden = true; file.tabIndex = -1; file.accept = '.risup,.risupreset,.json,.preset' + (isPreset ? '' : ',.txt,.text');
-      const area = el(isPreset ? 'input' : 'textarea'); area.id = id; area.setAttribute('aria-label', title);
-      const status = el('p', '', 'file-status'); status.setAttribute('role', 'status');
-      const clear = button('지우기', () => {
-        area.value = ''; delete state.filePresets[id]; status.textContent = '';
-        refreshSlot(id); prepareStoredBaseline(id); updateFavoriteSelect(modeOf(id)); invalidate(modeOf(id));
-      }, 'btn ghost sm clear');
-      if (isPreset) {
-        area.type = 'hidden';
-        const drop = button('', () => file.click(), 'drop'); drop.append(el('b', '파일 열기'), el('small', '여기로 끌어다 놓거나 눌러서 선택'));
-        card.append(drop, status, el('p', null, 'overview'), clear, area, file);
-      } else {
-        area.placeholder = optional ? '없으면 비워 둬. 직접 붙여넣어도 돼.' : '=그룹 이름=group\nkey=표시 이름\n==groupEnd'; area.rows = 7; area.spellcheck = false;
-        const bar = el('div', null, 'row'); bar.append(button('파일 열기', () => file.click(), 'btn sm'), clear, status);
-        card.append(area, bar, file);
-      }
-      parent.appendChild(card); refreshSlot(id);
-      area.addEventListener('input', () => { status.textContent = '텍스트 입력'; refreshSlot(id); delete state.filePresets[id]; selectUploadedReference(id); prepareStoredBaseline(id); updateFavoriteSelect(modeOf(id)); invalidate(modeOf(id)); });
-      const read = guard(async f => {
-        if (!f) return;
-        if (f.size > 10 * 1024 * 1024) throw new Error('파일은 10MB 이하로 불러와 줘.');
-        let text;
-        if (isPreset || /\.(?:risup|risupreset|json|preset)$/i.test(f.name)) {
-          const preset = await C.importPresetFile(f);
-          state.filePresets[id] = C.sanitizePreset(preset);
-          text = isPreset ? JSON.stringify(preset, null, 2) : preset.customPromptTemplateToggle || '';
-        } else {
-          text = (await f.text()).replace(/^\uFEFF/, '');
-          if (/^\s*\{/.test(text)) { const preset = C.sanitizePreset(C.parsePreset(text)); state.filePresets[id] = preset; text = preset.customPromptTemplateToggle || ''; }
-          else delete state.filePresets[id];
+    function setPromptType(block, type) {
+      // Retain existing content and extra fields when changing type; initialize required fields only.
+      const previousRole = formatTypes.includes(block.type) ? block.role2 : block.role;
+      block.type = type;
+      if (plainTypes.includes(type) || type === 'chatML') {
+        if (typeof block.text !== 'string') block.text = block.innerFormat || block.defaultText || '';
+        if (plainTypes.includes(type)) {
+          if (!['normal', 'main', 'globalNote'].includes(block.type2)) block.type2 = 'normal';
+          block.role = ['user', 'bot', 'system'].includes(previousRole) ? previousRole : ['assistant', 'char'].includes(previousRole) ? 'bot' : 'system';
         }
-        area.value = text; status.textContent = f.name + ' · ' + Math.round(f.size / 1024) + 'KB';
-        refreshSlot(id); selectUploadedReference(id); prepareStoredBaseline(id); updateFavoriteSelect(modeOf(id)); invalidate(modeOf(id));
-      });
-      file.addEventListener('change', () => { read(file.files[0]); file.value = ''; });
-      card.addEventListener('dragover', e => { if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); card.classList.add('dragover'); } });
-      card.addEventListener('dragleave', () => card.classList.remove('dragover'));
-      card.addEventListener('drop', e => { if (e.dataTransfer?.files.length) { e.preventDefault(); card.classList.remove('dragover'); read(e.dataTransfer.files[0]); } });
-    }
-    makeInput($('preset-slots'), 'preset-local', { title: '내 커스텀본', tone: 'mine', hint: '내가 고쳐서 쓰던 프리셋' });
-    makeInput($('preset-slots'), 'preset-latest', { title: '새 원본', tone: 'theirs', hint: '새로 나온 최신 프리셋' });
-    makeInput($('preset-base-input'), 'preset-base', { title: '옛 원본 직접 불러오기', optional: true, hint: '비워 두면 선택한 보관본으로 비교해. 다른 원본으로 비교하고 싶을 때만 써.' });
-    makeInput($('toggle-slots'), 'toggle-local', { title: '내 토글 · 즐겨찾기', tone: 'mine', optional: true, hint: '비워 두면 즐겨찾기를 새로 만들어.' });
-    makeInput($('toggle-slots'), 'toggle-latest', { title: '새 원본 토글', tone: 'theirs', hint: '필수' });
-    makeInput($('toggle-base-input'), 'toggle-base', { title: '옛 원본 토글 직접 불러오기', optional: true, hint: '비워 두면 보관한 기준 토글을 써.' });
-    makeInput($('library-inputs'), 'library-source', { title: '보관할 프리셋 파일' });
-    updateFavoriteSelect('preset'); updateFavoriteSelect('toggle');
-    optionIds.forEach(id => {
-      if (id === 'preset-name' || id.endsWith('-keep')) return;
-      $(id).addEventListener(id.includes('aliases') ? 'input' : 'change', () => invalidate(modeOf(id)));
-    });
-    $('preset-name').addEventListener('input', () => { const c = state.work.preset.current; if (c) { c.savedRecord = null; if (state.mode === 'preset' && state.step.preset === 'save') renderSave(); } });
-
-    // ---- Merge ------------------------------------------------------------------------------
-    const migrationOptions = mode => ({ favoriteIndex: Number($(mode + '-fav').value), keepInOriginal: $(mode + '-keep').checked,
-      aliases: $(mode + '-aliases').value, preserveSettings: $('preserve-settings').checked, name: $('preset-name').value.trim() });
-    function run() {
-      const w = active(), mode = state.mode, options = migrationOptions(mode);
-      let result;
-      if (mode === 'preset') {
-        if (!state.archiveLoaded) throw new Error('보관한 원본을 불러오는 중이야. 잠시 뒤 다시 눌러 줘.');
-        const values = ['local', 'latest'].map(key => { try { return C.parsePreset($('preset-' + key).value); } catch (e) { throw new Error(({ local: '내 커스텀본', latest: '새 원본' })[key] + ': ' + e.message); } });
-        let baseline = state.baseline?.preset || null;
-        if ($('preset-base').value.trim()) { try { baseline = C.parsePreset($('preset-base').value); } catch (e) { throw new Error('옛 원본: ' + e.message); } }
-        result = baseline ? C.mergePresets(baseline, ...values, options, w.choices) : C.mergeInitialPresets(...values, options, w.choices);
-        result.release = C.sanitizePreset(values[1]); result.releaseId = state.baseline?.id || '';
-        result.releaseLabel = $('release-label').value.trim() || state.baseline?.label || values[1].name || '프리셋';
-      } else {
-        const source = state.filePresets['toggle-latest'] || null;
-        if (!$('toggle-latest').value.trim() && !source) throw new Error('새 원본 토글을 불러와 줘.');
-        const baseline = $('toggle-base').value.trim() ? $('toggle-base').value :
-          state.toggleBaseline ? state.toggleBaseline.toggleBaseline ?? state.toggleBaseline.preset?.customPromptTemplateToggle ?? null : null;
-        const toggles = C.migrateToggles(baseline, $('toggle-local').value, $('toggle-latest').value, options, w.choices);
-        result = { toggles, conflicts: toggles.conflicts, changes: [], warnings: toggles.warnings,
-          release: clone(source), releaseId: state.toggleBaseline?.id || '', releaseLabel: state.toggleBaseline?.label || source?.name || '토글 프리셋', toggleSource: $('toggle-latest').value };
+      } else if (formatTypes.includes(type)) {
+        if (typeof block.innerFormat !== 'string') block.innerFormat = block.text || '{{slot}}';
+        if (previousRole && previousRole !== 'all') block.role2 = ['assistant', 'char'].includes(previousRole) ? 'bot' : previousRole;
+      } else if (type === 'chat') {
+        if (!Number.isInteger(block.rangeStart)) block.rangeStart = 0;
+        if (block.rangeEnd !== 'end' && !Number.isInteger(block.rangeEnd)) block.rangeEnd = 'end';
+      } else if (type === 'cache') {
+        if (!Number.isInteger(block.depth)) block.depth = 0;
+        block.role = ['user', 'assistant', 'system', 'all'].includes(previousRole) ? previousRole : ['bot', 'char'].includes(previousRole) ? 'assistant' : 'all';
       }
-      w.current = result; w.stale = false; w.manual = false; w.promptDraft = null; w.groups = clone(result.toggles.groups); w.selected.clear();
-      w.catalog = new Map();
-      w.groups.forEach(g => g.items.forEach(it => { if (it.type === 'item') w.catalog.set(it.key, clone(it)); }));
-      w.homes = new Map();
-      w.groups.forEach(g => g.items.forEach(it => { if (it.type === 'item' && !w.homes.has(it.key)) w.homes.set(it.key, { name: g.name, explicit: g.explicit }); }));
-      const homeText = mode === 'preset' ? C.parsePreset($('preset-latest').value).customPromptTemplateToggle || '' : $('toggle-latest').value;
-      const latestHomes = new Set();
-      C.parseToggles(homeText).forEach(g => g.items.forEach(it => {
-        if (it.type === 'item' && !latestHomes.has(it.key)) { w.homes.set(it.key, { name: g.name, explicit: g.explicit }); latestHomes.add(it.key); }
-      }));
-      const localText = mode === 'preset' ? C.parsePreset($('preset-local').value).customPromptTemplateToggle : $('toggle-local').value;
-      const originalGroups = C.parseToggles(localText || ''), selected = originalGroups[options.favoriteIndex];
-      const occurrence = originalGroups.slice(0, options.favoriteIndex).filter(g => g.name === selected?.name && g.explicit === selected?.explicit).length;
-      w.favoriteUid = selected ? w.groups.filter(g => g.name === selected.name && g.explicit === selected.explicit)[occurrence]?.uid || '' : '';
-      render();
-      const pending = unresolved();
-      notify(pending ? pending + '개 충돌이 있어. 각 항목에서 사용할 버전을 골라 줘.' : '병합을 마쳤어! 결과를 확인하고 저장해 줘.', pending ? '' : 'ok');
     }
-    async function requestRun() {
-      const w = active();
-      if (w.manual && !(await ask('다시 병합할까?', '다시 병합하면 직접 편집한 프롬프트와 토글 배치가 초기화돼.', '다시 병합', true))) return;
-      run(); goStep(unresolved() ? 'conflicts' : state.mode === 'preset' ? 'prompts' : 'toggles');
+    function addBlock() {
+      if (!Array.isArray(state.draft?.promptTemplate) || state.busy) return;
+      change(() => {
+        const meta = { id: uid(), original: null, custom: true };
+        state.draft.promptTemplate.push({ type: 'plain', type2: 'normal', role: 'system', name: '새 블록', text: '' });
+        state.meta.push(meta); state.selected = state.editing = meta.id;
+      });
+      const node = $('blocks').lastElementChild?.previousElementSibling;
+      node?.scrollIntoView({ block: 'nearest' }); node?.querySelector('input[aria-label="블록 이름"]')?.focus();
     }
-    $('run-preset').addEventListener('click', guard(requestRun));
-    $('run-toggle').addEventListener('click', guard(requestRun));
-
-    // ---- Conflicts --------------------------------------------------------------------------
-    const promptLabels = { mainPrompt: '메인 프롬프트', jailbreak: '추가 프롬프트', globalNote: '글로벌 노트', templateDefaultVariables: '기본 변수', instructChatTemplate: '인스트럭트 템플릿', JinjaTemplate: 'Jinja 템플릿', formatingOrder: '포맷 순서', name: '이름', text: '본문', innerFormat: '내부 포맷', role: '역할' };
-    const toggleSections = { definitions: '정의', 'base-duplicates': '옛 원본의 중복 키', 'local-duplicates': '내 커스텀본의 중복 키', 'latest-duplicates': '새 원본의 중복 키' };
-    function friendlyPath(path, first) {
-      const parts = path.split('/').slice(1).map(p => p.replace(/~1/g, '/').replace(/~0/g, '~')), head = parts[0], rest = parts.slice(1);
-      const map = list => list.map(p => promptLabels[p] || p).join(' › ');
-      if (head === 'toggles') return '토글 › ' + rest.map(p => toggleSections[p] || p).join(' › ');
-      if (head === 'promptTemplate') {
-        const m = /^(block|added|personal)-(\d+)$/.exec(rest[0] || '');
-        if (m) {
-          const source = first ? (m[1] === 'personal' ? 'local' : 'latest') : (m[1] === 'block' ? 'base' : 'latest');
-          const block = inputPreset(source)?.promptTemplate?.[Number(m[2])];
-          return '프롬프트 블록 “' + (block ? block.name || block.type : '#' + (Number(m[2]) + 1)) + '”' + (rest.length > 1 ? ' › ' + map(rest.slice(1)) : '');
+    async function deleteBlock(id) {
+      if (!await confirmAction('블록을 삭제할까?', '현재 프리셋에서 이 블록을 빼. 보관한 커스텀 카드는 그대로야.', true)) return;
+      change(() => {
+        const index = state.meta.findIndex(meta => meta.id === id); if (index < 0) return;
+        state.draft.promptTemplate.splice(index, 1); state.meta.splice(index, 1);
+        if (state.editing === id) state.editing = ''; if (state.selected === id) state.selected = '';
+      });
+    }
+    function renderDocument() {
+      $('welcome').hidden = !!state.draft; $('loaded').hidden = !state.draft;
+      if (!state.draft) return;
+      $('name').value = state.draft.name || ''; updateStatus(); renderBlocks(); renderFields(); renderSide();
+    }
+    function renderFields() {
+      const container = $('fields'); container.replaceChildren();
+      container.append(inputField('토글 정의', state.draft.customPromptTemplateToggle || '', text => change(() => {
+        state.draft.customPromptTemplateToggle = text;
+      }, 'field:customPromptTemplateToggle', false)));
+    }
+    function move(index, target) {
+      if (index < 0 || index >= state.meta.length || target < 0 || target > state.meta.length || target === index || target === index + 1) return;
+      change(() => { const [block] = state.draft.promptTemplate.splice(index, 1), [meta] = state.meta.splice(index, 1); const at = target > index ? target - 1 : target; state.draft.promptTemplate.splice(at, 0, block); state.meta.splice(at, 0, meta); state.selected = meta.id; });
+    }
+    function insertCard(card, index) {
+      if (!state.draft || !Array.isArray(state.draft.promptTemplate)) { notify('순서형 블록이 있는 프리셋을 먼저 열어 줘.', true); return; }
+      if (!Number.isInteger(index) || index < 0 || index > state.meta.length) return;
+      change(() => { const meta = { id: uid(), custom: true, cardId: card.id, original: null };
+        state.draft.promptTemplate.splice(index, 0, blockFromCard(card)); state.meta.splice(index, 0, meta); state.selected = meta.id; });
+      const node = $('blocks').querySelector('[data-id="' + state.selected + '"]'); node?.scrollIntoView({ block: 'nearest' });
+      notify('커스텀 블록을 추가했어. 보관한 카드는 그대로야.');
+    }
+    function startDrag(event, payload) {
+      if (state.busy) { event.preventDefault(); return; }
+      state.drag = payload; event.dataTransfer.effectAllowed = payload.kind === 'card' ? 'copy' : 'move';
+      event.dataTransfer.setData('text/plain', payload.kind === 'card' ? payload.card.name : '프롬프트 블록');
+      event.currentTarget.classList.add('pe-dragging');
+    }
+    function endDrag() {
+      state.drag = null; scrollPointer = null; cancelAnimationFrame(autoScrollFrame); autoScrollFrame = 0;
+      $('blocks')?.querySelectorAll('.pe-gap.active').forEach(node => node.classList.remove('active'));
+      root.querySelectorAll('.pe-dragging').forEach(node => node.classList.remove('pe-dragging')); state.gap = null;
+    }
+    function autoScroll() {
+      if (!state.drag || !scrollPointer) { autoScrollFrame = 0; return; }
+      const list = $('blocks'), rect = list.getBoundingClientRect(), y = scrollPointer.y;
+      if (scrollPointer.x >= rect.left && scrollPointer.x <= rect.right) {
+        const speed = y < rect.top + 64 ? -Math.min(22, (rect.top + 64 - y) / 3) : y > rect.bottom - 64 ? Math.min(22, (y - rect.bottom + 64) / 3) : 0;
+        if (y >= rect.top - 40 && y <= rect.bottom + 40) list.scrollTop += speed;
+      }
+      autoScrollFrame = requestAnimationFrame(autoScroll);
+    }
+    function locateGap(event) {
+      if (!state.drag || !Array.isArray(state.draft?.promptTemplate)) return null;
+      const gap = event.target.closest('.pe-gap'); if (gap) return Number(gap.dataset.index);
+      const block = event.target.closest('.pe-block');
+      if (block) { const rect = block.getBoundingClientRect(); return Number(block.dataset.index) + (event.clientY >= rect.top + rect.height / 2 ? 1 : 0); }
+      return state.meta.length;
+    }
+    function renderBlocks() {
+      const list = $('blocks'), scrollTop = list.scrollTop; list.replaceChildren();
+      const blocks = state.draft.promptTemplate;
+      $('block-help').textContent = Array.isArray(blocks) ? '블록을 펼쳐 본문을 확인하고, 카드를 원하는 블록 사이로 드래그해. ⋮⋮ 손잡이로 기존 블록도 옮길 수 있어.' : '이 프리셋은 순서형 블록을 사용하지 않아. 토글 정의를 편집할 수 있어. 카드 삽입은 블록형 프리셋에서 사용할 수 있어.';
+      if (!Array.isArray(blocks)) { list.append(el('p', '기본 형식 프리셋 · 토글 편집을 사용할 수 있어.', 'empty')); return; }
+      const appendGap = index => { const gap = el('div', null, 'pe-gap'); gap.dataset.index = String(index); gap.setAttribute('aria-hidden', 'true'); list.append(gap); };
+      blocks.forEach((block, index) => {
+        appendGap(index); const meta = state.meta[index];
+        const card = el('article', null, 'pe-block' + (meta.custom ? ' custom' : '') + (state.selected === meta.id ? ' selected' : '') + (collapsed.has(meta.id) ? ' collapsed' : '') + (state.editing === meta.id ? ' editing' : ''));
+        card.dataset.index = String(index); card.dataset.id = meta.id;
+        card.addEventListener('click', () => { state.selected = meta.id; list.querySelectorAll('.selected').forEach(node => node.classList.remove('selected')); card.classList.add('selected'); });
+        const head = el('div', null, 'pe-block-head');
+        const grip = btn('⋮⋮', () => {}, 'btn ghost sm icon pe-grip'); grip.draggable = true; grip.setAttribute('aria-label', titleOf(block) + ' 블록 이동');
+        grip.addEventListener('dragstart', event => startDrag(event, { kind: 'block', id: meta.id })); grip.addEventListener('dragend', endDrag);
+        const heading = btn((collapsed.has(meta.id) ? '▸ ' : '▾ ') + titleOf(block), () => { state.selected = meta.id; if (collapsed.has(meta.id)) collapsed.delete(meta.id); else collapsed.add(meta.id); renderBlocks(); }, 'pe-block-title');
+        heading.setAttribute('aria-expanded', String(!collapsed.has(meta.id)));
+        head.append(grip, el('span', String(index + 1), 'badge'), heading);
+        if (meta.custom) head.append(el('span', '커스텀', 'badge custom'));
+        const modified = meta.original && !C.same(block, meta.original), modifiedBadge = el('span', '수정됨', 'badge changed'); modifiedBadge.hidden = !modified; head.append(modifiedBadge);
+        head.append(btn(state.editing === meta.id ? '편집 닫기' : '편집', () => { state.editing = state.editing === meta.id ? '' : meta.id; state.selected = meta.id; renderBlocks(); }));
+        const remove = btn('삭제', () => deleteBlock(meta.id), 'btn sm ghost danger'); remove.setAttribute('aria-label', '블록 삭제'); head.append(remove);
+        const up = btn('↑', () => move(index, index - 1), 'btn ghost sm icon'), down = btn('↓', () => move(index, index + 2), 'btn ghost sm icon');
+        up.disabled = index === 0; down.disabled = index === blocks.length - 1; up.setAttribute('aria-label', titleOf(block) + ' 위로 이동'); down.setAttribute('aria-label', titleOf(block) + ' 아래로 이동'); head.append(up, down);
+        card.append(head);
+        const text = bodyOf(block), preview = el('pre', text || '채팅할 때 RisuAI가 이 블록의 내용을 채워. 직접 지정한 본문은 없어.', 'pe-block-text'); card.append(preview);
+        card.append(el('p', [labels[block.type] || block.type, block.type2 && ({ main: '메인', globalNote: '글로벌 노트', normal: '일반' }[block.type2] || block.type2), block.role || block.role2].filter(Boolean).join(' · '), 'pe-block-meta'));
+        if (state.editing === meta.id) {
+          const editor = el('div', null, 'pe-block-editor');
+          const write = (key, value) => {
+            change(() => { block[key] = value; }, meta.id + ':' + key, false);
+            preview.textContent = bodyOf(block) || '직접 지정한 본문은 없어.';
+            heading.textContent = (collapsed.has(meta.id) ? '▸ ' : '▾ ') + titleOf(block); modifiedBadge.hidden = !meta.original || C.same(block, meta.original);
+          };
+          editor.append(inputField('블록 이름', block.name || '', value => write('name', value), false));
+          const types = el('div', null, 'grid2');
+          types.append(selectField('프롬프트 타입', Object.fromEntries(promptTypes.map(type => [type, labels[type] || type])), block.type, value => change(() => setPromptType(block, value))));
+          if (plainTypes.includes(block.type)) types.append(selectField('특수 타입', specialTypes, block.type2 || 'normal', value => change(() => { block.type2 = value; })));
+          editor.append(types);
+          const editKeys = plainTypes.includes(block.type) || block.type === 'chatML' ? ['text'] : formatTypes.includes(block.type) ? ['innerFormat', ...(block.type === 'authornote' ? ['defaultText'] : [])] : textKeys.filter(key => typeof block[key] === 'string' && !promptTypes.includes(block.type));
+          editKeys.forEach(key => editor.append(inputField(({ text: '본문', innerFormat: '내부 포맷', defaultText: '기본 본문' })[key], block[key] || '', value => write(key, value))));
+          if (plainTypes.includes(block.type)) {
+            editor.append(selectField('블록 역할', { system: '시스템', user: '유저', bot: '캐릭터' }, block.role || 'system', value => change(() => { block.role = value; })));
+          } else if (formatTypes.includes(block.type)) {
+            editor.append(selectField('블록 역할', { '': '원래 역할 유지', system: '시스템', user: '유저', bot: '캐릭터' }, block.role2 || '', value => change(() => { if (value) block.role2 = value; else delete block.role2; })));
+          } else if (block.type === 'chat') {
+            const range = el('div', null, 'grid2');
+            const rangeField = (key, title, fallback) => {
+              const field = inputField(title, String(block[key] ?? fallback), () => {}, false), input = field.querySelector('input');
+              input.addEventListener('change', guard(() => {
+                const text = input.value.trim(), value = key === 'rangeEnd' && text === 'end' ? 'end' : Number(text);
+                if (!text || (value !== 'end' && !Number.isInteger(value))) { input.value = String(block[key] ?? fallback); throw new Error(title + '은 정수' + (key === 'rangeEnd' ? ' 또는 end' : '') + '로 입력해 줘.'); }
+                change(() => { block[key] = value; });
+              })); return field;
+            };
+            range.append(rangeField('rangeStart', '채팅 시작 위치', 0), rangeField('rangeEnd', '채팅 끝 위치', 'end')); editor.append(range);
+          } else if (block.type === 'cache') {
+            const depth = inputField('캐시 깊이', String(block.depth ?? 0), () => {}, false), input = depth.querySelector('input'); input.type = 'number'; input.step = '1'; input.min = '0';
+            input.addEventListener('change', guard(() => { const value = Number(input.value); if (!input.value.trim() || !Number.isInteger(value) || value < 0) { input.value = String(block.depth ?? 0); throw new Error('캐시 깊이는 0 이상의 정수로 입력해 줘.'); } change(() => { block.depth = value; }); }));
+            editor.append(depth, selectField('캐시 역할', { all: '전체', system: '시스템', user: '유저', assistant: '캐릭터' }, block.role || 'all', value => change(() => { block.role = value; })));
+          }
+          const actions = el('div', null, 'row');
+          if (editKeys.length) actions.append(btn('새 커스텀 카드로 저장', () => openCardDraft('', cardFromBlock(block))));
+          const source = state.cards.find(entry => entry.id === meta.cardId);
+          if (source && editKeys.length) actions.append(btn('보관한 카드에 반영', async () => {
+            if (!await confirmAction('보관한 카드도 수정할까?', '“' + source.name + '” 카드의 이름과 구문을 현재 블록 내용으로 바꿔. 이미 삽입한 다른 블록은 그대로야.')) return;
+            await mutateCards(cards => { const target = cards.find(entry => entry.id === source.id); if (!target) throw new Error('보관한 카드가 없어. 새 카드로 저장해 줘.'); Object.assign(target, cardFromBlock(block), { name: titleOf(block).slice(0, 200) }); });
+            notify('보관한 카드에 반영했어.');
+          }));
+          editor.append(actions);
+          card.append(editor);
         }
-        return rest[0] === '@order' ? '프롬프트 블록 순서' : '프롬프트 블록' + (rest.length ? ' › ' + map(rest) : '');
-      }
-      return (promptLabels[head] || head) + (rest.length ? ' › ' + map(rest) : '');
-    }
-    function renderConflicts() {
-      const w = active(), list = $('conflicts-list'), index = $('conflict-index'); list.replaceChildren(); index.replaceChildren();
-      const conflicts = w.current?.conflicts || [], first = !!w.current?.firstMigration;
-      const left = unresolved();
-      $('conflicts-progress').textContent = left ? '미해결 ' + left + '개 · 전체 ' + conflicts.length + '개. 모두 고르면 저장할 수 있어.' : '모든 충돌을 해결했어. 다음 단계로 넘어가도 돼.';
-      $('all-local').disabled = $('all-latest').disabled = !conflicts.length;
-      if (!conflicts.some(c => c.id === w.conflictId)) w.conflictId = (conflicts.find(c => !c.resolved) || conflicts[0])?.id || '';
-      conflicts.forEach(c => {
-        const item = button('', () => { w.conflictId = c.id; renderConflicts(); }, 'cidx' + (c.resolved ? ' resolved' : ''));
-        item.append(el('span', friendlyPath(c.path, first)), el('small', c.resolved ? '✓ 선택 완료' : '● 선택 필요'));
-        item.setAttribute('aria-current', String(c.id === w.conflictId)); index.appendChild(item);
-        if (c.id !== w.conflictId) return;
-        const box = el('div', null, 'conflict');
-        const title = el('div'); title.append(el('h3', friendlyPath(c.path, first)), el('code', c.path), el('p', c.reason, 'hint')); box.append(title);
-        const versions = el('div', null, 'versions' + (first ? '' : ' has-base'));
-        (first ? [['mine', '내 커스텀본', c.local], ['theirs', '새 원본', c.latest]] : [['base', '옛 원본', c.base], ['mine', '내 커스텀본', c.local], ['theirs', '새 원본', c.latest]]).forEach(([tone, name, text]) => {
-          let display = text;
-          if (['array', 'object'].includes(c.valueType)) { try { display = structuredText(C.parseJSON(text)); } catch (_) { /* Missing-version labels are already readable. */ } }
-          const d = el('div', null, 'ver ' + tone); d.append(el('b', name), el('pre', display)); versions.appendChild(d);
-        }); box.appendChild(versions);
-        const controls = el('div', null, 'choices');
-        ['local', 'latest', 'delete'].forEach(mode => {
-          const b = button(({ local: '내 커스텀본 사용', latest: '새 원본 사용', delete: '이 항목 삭제' })[mode], guard(() => decide(c.id, { mode })), 'btn');
-          b.setAttribute('aria-pressed', String(w.choices[c.id]?.mode === mode)); controls.appendChild(b);
-        }); box.appendChild(controls);
-        if (['array', 'object'].includes(c.valueType)) { box.appendChild(el('p', '구조 항목은 사용할 버전만 고를 수 있어. 프롬프트 본문은 충돌을 모두 고른 뒤 “프롬프트” 단계에서 고쳐.', 'hint')); list.appendChild(box); return; }
-        const details = el('details'); details.appendChild(el('summary', '직접 병합하기'));
-        const area = el('textarea'); area.setAttribute('aria-label', friendlyPath(c.path, first) + ' 직접 병합');
-        const choice = w.choices[c.id]; area.value = w.conflictDrafts[c.id] ?? (choice?.mode === 'custom' ? (typeof choice.value === 'string' ? choice.value : JSON.stringify(choice.value, null, 2)) : c.latestMissing ? c.local : c.latest);
-        area.addEventListener('input', () => { w.conflictDrafts[c.id] = area.value; });
-        details.appendChild(area); details.appendChild(button('직접 편집한 값 사용', guard(() => {
-          const value = c.valueType === 'string' ? area.value : C.parseJSON(area.value);
-          if (c.valueType === 'array' && !Array.isArray(value)) throw new Error('이 항목은 JSON 배열이어야 해.');
-          if (c.valueType === 'object' && !object(value)) throw new Error('이 항목은 JSON 객체이어야 해.');
-          if (!['array', 'object'].includes(c.valueType) && typeof value !== c.valueType) throw new Error('값의 형식이 맞지 않아: ' + c.valueType);
-          return decide(c.id, { mode: 'custom', value });
-        }), 'btn primary'));
-        box.appendChild(details); list.appendChild(box);
+        list.append(card);
       });
+      if (!blocks.length) list.append(el('p', '커스텀 카드를 여기로 드래그해서 첫 블록을 추가해.', 'empty'));
+      appendGap(blocks.length);
+      list.scrollTop = scrollTop;
     }
-    async function decide(id, choice) {
-      const w = active();
-      if (w.manual && !(await ask('선택을 바꿀까?', '충돌 선택을 바꾸면 직접 편집한 프롬프트와 토글 배치가 초기화돼.', '바꾸기', true))) return;
-      w.choices[id] = choice; w.conflictId = ''; run();
+    function validateCards(value) {
+      if (!object(value) || value.type !== 'preset-editor-custom-cards' || value.version !== 1 || !Array.isArray(value.cards)) throw new Error('커스텀 보관함 형식이 올바르지 않아.');
+      const ids = new Set();
+      value.cards.forEach(card => {
+        if (!object(card) || typeof card.id !== 'string' || !card.id || ids.has(card.id) || typeof card.name !== 'string' || !card.name.trim() || card.name.length > 200 || typeof card.text !== 'string') throw new Error('커스텀 카드 내용이 올바르지 않아.');
+        if ((own(card, 'type') && (typeof card.type !== 'string' || !card.type)) || (own(card, 'type2') && (typeof card.type2 !== 'string' || !own(specialTypes, card.type2))) || (own(card, 'role') && !['', 'system', 'user', 'bot', 'assistant', 'char', 'all'].includes(card.role))) throw new Error('커스텀 카드의 타입이나 역할이 올바르지 않아.');
+        ids.add(card.id);
+      });
+      return value.cards.map(({ id, name, text, ...settings }) => ({ id, name, text, ...cardSettings(settings) }));
     }
-    const chooseAll = mode => guard(async () => {
-      const w = active();
-      if (w.manual && !(await ask('전체를 다시 선택할까?', '전체 충돌을 다시 선택하면 편집한 프롬프트와 토글 배치가 초기화돼.', '진행', true))) return;
-      w.current.conflicts.forEach(c => { w.choices[c.id] = { mode }; }); run();
-    });
-    $('all-local').addEventListener('click', chooseAll('local'));
-    $('all-latest').addEventListener('click', chooseAll('latest'));
-
-    // ---- Prompt viewer / editor ------------------------------------------------------------
-    const mergedPromptVisible = () => !!state.work.preset.current && !state.work.preset.stale;
-    function inputPreset(source) {
+    async function loadCards() {
+      if (state.cardBusy) return;
+      try { const raw = await storage.get(CARD_KEY); state.cards = raw ? validateCards(C.parseJSON(raw)) : []; state.cardsReady = true; }
+      catch (e) { state.cardsReady = false; state.cardMessage = '보관함을 읽지 못했어: ' + e.message; state.cardError = true; notify(state.cardMessage, true); }
+      renderCards(); renderSide();
+    }
+    async function mutateCards(fn) {
+      if (state.cardBusy) throw new Error('카드를 저장하는 중이야. 잠시 뒤 다시 시도해 줘.');
+      const cleanDraft = !cardDirty(), editingId = state.cardId;
+      state.cardBusy = true; renderCardStatus();
       try {
-        const text = $('preset-' + source).value;
-        return text.trim() ? C.parsePreset(text) : source === 'base' ? state.baseline?.preset || null : null;
-      } catch (_) { return null; }
+        const raw = await storage.get(CARD_KEY), cards = raw ? validateCards(C.parseJSON(raw)) : [];
+        fn(cards); const next = { type: 'preset-editor-custom-cards', version: 1, cards };
+        const json = JSON.stringify(next); validateCards(C.parseJSON(json)); await storage.set(CARD_KEY, json); state.cards = cards; state.cardsReady = true;
+        if (cleanDraft && editingId && state.cardId === editingId && !cardDirty()) { const current = cards.find(card => card.id === editingId); fillCardDraft(current ? editingId : '', current || {}); }
+      } finally { state.cardBusy = false; renderCards(); renderSide(); }
     }
-    function selectUploadedReference(id) {
-      if (id === 'preset-latest' && inputPreset('latest')) promptView.source = 'latest';
-      else if (id === 'preset-local' && !inputPreset('latest')) promptView.source = 'local';
-      else if (id === 'preset-base' && !inputPreset('latest') && !inputPreset('local')) promptView.source = 'base';
+    function cardFormValue() { return JSON.stringify({ name: $('card-name').value, text: $('card-text').value, ...state.cardSettings }); }
+    function cardDirty() { return cardFormValue() !== state.cardBefore; }
+    function renderCardStatus() {
+      $('card-count').textContent = String(state.cards.length);
+      $('card-save').disabled = state.cardBusy; $('new-card').disabled = state.cardBusy;
+      $('card-save').textContent = state.cardBusy ? '저장 중…' : '카드 저장';
+      $('card-name').disabled = $('card-text').disabled = state.cardBusy;
+      $('card-options').querySelectorAll('select').forEach(select => { select.disabled = state.cardBusy; });
+      $('card-draft-status').textContent = state.cardBusy ? '커스텀 카드를 저장하고 있어…' : state.cardMessage || (cardDirty() ? '아직 저장하지 않은 내용이 있어.' : '');
+      $('card-draft-status').dataset.error = String(!state.cardBusy && state.cardError);
     }
-    function rowsFromPreset(preset, origin = 'result') {
-      if (!preset) return [];
-      const rows = (preset.promptTemplate || []).map((value, index) => ({ key: (origin === 'result' ? '' : origin + ':') + 'block:' + index, index, value, origin, title: value.name || (index + 1) + '. ' + value.type, subtitle: value.type + (value.role ? ' · ' + value.role : '') }));
-      for (const key of PROMPTS) if (key !== 'promptTemplate' && own(preset, key)) rows.push({ key: 'field:' + key, field: key, value: preset[key], origin, title: promptLabels[key] || key, subtitle: key });
-      return rows;
+    function fillCardDraft(id = '', values = {}) {
+      state.cardId = id; $('card-name').value = values.name || ''; $('card-text').value = values.text || '';
+      state.cardSettings = cardSettings(values); renderCardOptions();
+      state.cardMessage = ''; state.cardError = false;
+      state.cardBefore = cardFormValue(); $('form-title').textContent = id ? '커스텀 카드 수정' : '새 커스텀 카드'; renderCardStatus();
     }
-    function matchPromptBlock(original, originals, blocks) {
-      if (!original || !blocks) return undefined;
-      for (const key of ['id', 'uuid']) if (original[key] != null) {
-        const matches = blocks.filter(b => same(b[key], original[key]));
-        if (matches.length === 1 && originals.filter(b => same(b[key], original[key])).length === 1) return matches[0];
-      }
-      const matches = blocks.filter(b => b.type === original.type && (b.name || '') === (original.name || ''));
-      return matches.length === 1 && originals.filter(b => b.type === original.type && (b.name || '') === (original.name || '')).length === 1 ? matches[0] : undefined;
-    }
-    function promptRows() {
-      const w = state.work.preset;
-      if (mergedPromptVisible()) return rowsFromPreset(w.promptDraft || w.current.preset);
-      const local = inputPreset('local'), source = referencePreset(), rows = rowsFromPreset(local, 'local');
-      if (promptView.source === 'local' && local) return rows;
-      for (const row of rowsFromPreset(source, 'reference')) {
-        const shared = row.field ? rows.some(r => r.field === row.field) : !!matchPromptBlock(row.value, source.promptTemplate, local?.promptTemplate);
-        if (!shared) { row.subtitle += ' · 참조 항목'; rows.push(row); }
-      }
-      return rows;
-    }
-    const selectedPromptRow = () => promptRows().find(row => row.key === promptView.key);
-    const referencePreset = () => inputPreset(promptView.source);
-    function referenceBlock(row, source) {
-      if (row.field) return source && own(source, row.field) ? source[row.field] : undefined;
-      if (!source?.promptTemplate) return undefined;
-      // An index is valid only within the exact source the preview row came from.
-      if (row.origin === 'reference') return source.promptTemplate[row.index];
-      if (row.origin === 'local' && promptView.source === 'local') return source.promptTemplate[row.index];
-      const originalPreset = row.origin === 'local' ? inputPreset('local') : state.work.preset.current.preset;
-      const original = originalPreset?.promptTemplate?.[row.index];
-      return matchPromptBlock(original, originalPreset?.promptTemplate || [], source.promptTemplate);
-    }
-    function structuredText(value) {
-      const lines = [];
-      function visit(current, depth, title) {
-        if (lines.length >= 1000) return;
-        const indent = '  '.repeat(depth), prefix = title ? title + ': ' : '';
-        if (current == null || typeof current !== 'object') { lines.push(indent + prefix + (current == null ? '없음' : String(current))); return; }
-        lines.push(indent + prefix + (Array.isArray(current) ? '항목 ' + current.length + '개' : ''));
-        if (depth >= 10) { lines.push(indent + '  (하위 항목 생략)'); return; }
-        const entries = Object.entries(current);
-        entries.slice(0, 100).forEach(([key, entry]) => visit(entry, depth + 1, Array.isArray(current) ? String(Number(key) + 1) : key));
-        if (entries.length > 100) lines.push(indent + '  (추가 항목 ' + (entries.length - 100) + '개)');
-      }
-      visit(value, 0, ''); return lines.join('\n');
-    }
-    const promptText = value => typeof value === 'string' ? value : value == null ? '' : structuredText(value);
-    function renderPromptNav() {
-      const root = $('prompt-nav'); root.replaceChildren();
-      const query = $('prompt-search').value.trim().toLocaleLowerCase(), rows = promptRows();
-      rows.filter(row => !query || (row.title + '\n' + promptText(row.value)).toLocaleLowerCase().includes(query)).forEach(row => {
-        const b = button('', () => { promptView.key = row.key; renderPromptNav(); renderPromptDetail(); }, 'pnav');
-        b.setAttribute('aria-current', String(promptView.key === row.key)); b.append(el('span', row.title), el('small', row.subtitle)); root.appendChild(b);
-      });
-      if (!root.childElementCount) root.appendChild(el('p', query ? '검색 결과가 없어.' : '표시할 프롬프트 항목이 없어.', 'hint'));
-    }
-    function markPromptEdit() {
-      const w = state.work.preset; w.manual = true; w.current.savedRecord = null;
-      $('prompt-edit-status').textContent = '수정 내용이 완성본에 반영돼. 저장 단계에서 파일로 저장해 줘.';
-      renderChrome();
-    }
-    function writePromptField(row, key, value) {
-      if (!ready() || state.mode !== 'preset' || state.exporting) return;
-      const w = state.work.preset;
-      if (!w.promptDraft) w.promptDraft = clone(w.current.preset);
-      if (row.field) w.promptDraft[row.field] = value;
-      else w.promptDraft.promptTemplate[row.index][key] = value;
-      markPromptEdit(); renderPromptNav(); $('prompt-reset').disabled = false;
-    }
-    function renderPromptDetail() {
-      const row = selectedPromptRow(), source = referencePreset(), reference = $('prompt-reference-body'), work = $('prompt-work-body');
-      const isMerged = mergedPromptVisible(), local = inputPreset('local');
-      reference.replaceChildren(); work.replaceChildren();
-      $('prompt-reference-name').textContent = source?.name || '불러온 참조 프리셋 없음';
-      $('prompt-work-name').textContent = row ? row.title + ' · ' + row.subtitle : '왼쪽에서 항목을 선택해 줘.';
-      $('prompt-work-title').textContent = isMerged ? '작업 중' : '내 커스텀본';
-      $('prompt-edit-status').textContent = isMerged && state.work.preset.promptDraft ? '직접 편집한 내용이 완성본에 반영돼 있어.' : '';
-      $('prompt-reset').disabled = !isMerged || !row || !ready() || !state.work.preset.promptDraft || state.exporting;
-      if (!row) {
-        const e1 = el('div', null, 'empty'); e1.append(el('p', '새 원본을 불러오거나 보관한 프리셋을 선택해 줘.'), button('파일 단계로 가기', () => goStep('files'), 'btn sm'));
-        reference.appendChild(e1); work.appendChild(el('p', '내 커스텀본을 불러오면 병합 전에도 내용을 볼 수 있어.', 'empty')); return;
-      }
-      const value = referenceBlock(row, source), editable = isMerged && state.mode === 'preset' && ready() && !state.exporting;
-      if (value === undefined) reference.appendChild(el('p', '이 참조에 대응하는 항목이 없거나, 같은 이름의 블록이 여러 개라 확정할 수 없어.', 'empty'));
-      else if (!row.field) {
-        const meta = el('div', null, 'prompt-meta'); [value.name || '(이름 없음)', value.type, value.type2, value.role].filter(Boolean).forEach(t => meta.appendChild(el('span', t, 'badge'))); reference.appendChild(meta);
-        const texts = ['text', 'innerFormat'].filter(key => typeof value[key] === 'string');
-        if (texts.length) texts.forEach(key => { reference.append(el('p', promptLabels[key], 'hint'), el('pre', value[key], 'prompt-reference')); });
-        else reference.appendChild(el('pre', promptText(value), 'prompt-reference'));
-      } else reference.appendChild(el('pre', promptText(value), 'prompt-reference'));
-      const workValue = isMerged || row.origin === 'local' ? row.value : row.field ? local?.[row.field] : undefined;
-      if (workValue === undefined) { work.appendChild(el('p', '내 커스텀본에 대응하는 항목이 없어. 참조 내용을 확인한 뒤 두 프리셋을 병합해 줘.', 'empty')); applyPromptWrap(); return; }
-      const addField = (key, content, multiline) => {
-        const label = el('label', null, 'prompt-field'), area = el(multiline ? 'textarea' : 'input'), name = row.field ? row.title : promptLabels[key] || key;
-        if (!multiline) area.type = 'text';
-        label.appendChild(el('span', name)); area.value = content; area.readOnly = !editable;
-        area.setAttribute('aria-label', '작업 중 ' + name); area.dataset.promptField = key;
-        if (multiline) area.spellcheck = false;
-        area.addEventListener('input', () => { writePromptField(row, key, area.value); if (!row.field && key === 'name') $('prompt-work-name').textContent = area.value || '(이름 없음)'; });
-        label.appendChild(area); work.appendChild(label);
+    function renderCardOptions() {
+      const settings = state.cardSettings, container = $('card-options'); container.replaceChildren();
+      const update = (key, value) => {
+        state.cardSettings = cardSettings({ ...state.cardSettings, [key]: value }); state.cardMessage = ''; state.cardError = false;
+        renderCardOptions(); renderCardStatus();
       };
-      if (row.field) {
-        if (typeof workValue === 'string') addField(row.field, workValue, true);
-        else work.append(el('p', '이 항목은 구조 데이터야. 원래 형식 그대로 보존해.', 'hint'), el('pre', promptText(workValue), 'prompt-reference'));
-      } else {
-        const meta = el('div', null, 'prompt-meta'); [workValue.type, workValue.type2].filter(Boolean).forEach(t => meta.appendChild(el('span', t, 'badge'))); work.appendChild(meta);
-        ['name', 'text', 'innerFormat', 'role'].forEach(key => { if (typeof workValue[key] === 'string' || key === 'name') addField(key, workValue[key] || '', key === 'text' || key === 'innerFormat'); });
+      container.append(selectField('프롬프트 타입', Object.fromEntries(promptTypes.map(type => [type, labels[type] || type])), settings.type, value => update('type', value)));
+      if (plainTypes.includes(settings.type)) container.append(selectField('특수 타입', specialTypes, settings.type2, value => update('type2', value)));
+      if (plainTypes.includes(settings.type) || formatTypes.includes(settings.type) || settings.type === 'cache') {
+        const options = settings.type === 'cache' ? { all: '전체', system: '시스템', user: '유저', assistant: '캐릭터' } : formatTypes.includes(settings.type) ? { '': '원래 역할 유지', ...roles } : roles;
+        container.append(selectField('블록 역할', options, settings.role, value => update('role', value)));
       }
-      if (!editable) work.prepend(el('p', state.exporting ? '저장 중이야. 저장을 마치면 편집할 수 있어.' : !isMerged ? '병합 전 미리보기야. 병합하면 여기서 바로 고칠 수 있어.' : '충돌을 모두 고르면 여기서 편집할 수 있어.', 'hint warn-text'));
-      applyPromptWrap();
+      $('card-text-field').hidden = !cardUsesText(settings.type);
     }
-    function applyPromptWrap() {
-      const wrap = $('prompt-wrap').checked;
-      document.querySelectorAll('#step-prompts textarea').forEach(area => { area.wrap = wrap ? 'soft' : 'off'; });
-      document.querySelectorAll('#step-prompts .prompt-reference').forEach(pre => { pre.style.whiteSpace = wrap ? 'pre-wrap' : 'pre'; pre.style.overflowWrap = wrap ? 'anywhere' : 'normal'; });
+    async function openCardDraft(id = '', values = null) {
+      if (state.cardBusy) return;
+      if (cardDirty() && !await confirmAction('카드 작성을 바꿀까?', '아직 저장하지 않은 카드 내용이 있어. 다른 카드를 열면 작성 중인 내용은 사라져.', true)) return;
+      const card = values || state.cards.find(entry => entry.id === id) || {};
+      fillCardDraft(id, card); tab('cards'); $('card-name').focus();
     }
-    function renderPromptViewer() {
-      if (!referencePreset()) promptView.source = ['latest', 'local', 'base'].find(source => inputPreset(source)) || 'latest';
-      $('prompt-reference-source').value = promptView.source;
-      const rows = promptRows(); if (!rows.some(row => row.key === promptView.key)) promptView.key = rows[0]?.key || '';
-      $('prompt-summary').textContent = !rows.length ? '파일 단계에서 프리셋을 불러오면 프롬프트가 여기에 보여.' : '항목 ' + rows.length + '개 · ' + (mergedPromptVisible() ? '왼쪽 참조와 오른쪽 병합 결과를 비교하면서 바로 고칠 수 있어.' : '병합 전에도 참조와 내 커스텀본을 비교해 볼 수 있어.');
-      renderPromptNav(); renderPromptDetail();
+    function snippetNode(card, compact) {
+      const node = el('article', null, 'pe-snippet'); node.dataset.cardId = card.id;
+      if (compact && Array.isArray(state.draft?.promptTemplate)) { node.draggable = true; node.addEventListener('dragstart', event => startDrag(event, { kind: 'card', card: clone(card) })); node.addEventListener('dragend', endDrag); }
+      node.append(el('h3', card.name));
+      if (cardUsesText(card.type)) node.append(el('pre', card.text || '(빈 구문)'));
+      const settings = cardSettings(card), badges = el('div', null, 'row');
+      badges.append(el('span', labels[settings.type] || settings.type, 'badge'));
+      if (plainTypes.includes(settings.type)) badges.append(el('span', specialTypes[settings.type2], 'badge'));
+      if (plainTypes.includes(settings.type) || formatTypes.includes(settings.type) || settings.type === 'cache') badges.append(el('span', settings.role ? ({ ...roles, assistant: '캐릭터', all: '전체' }[settings.role] || settings.role) : '원래 역할 유지', 'badge'));
+      node.append(badges);
+      const actions = el('div', null, 'row');
+      actions.append(btn('수정', () => openCardDraft(card.id), 'btn ghost sm'));
+      if (!compact) actions.append(btn('삭제', async () => {
+        if (state.cardBusy || !await confirmAction('카드를 삭제할까?', '“' + card.name + '”을 보관함에서 삭제해. 프리셋에 삽입한 블록은 그대로 남아.', true)) return;
+        if (state.cardId === card.id && cardDirty() && !await confirmAction('작성 중인 내용도 지울까?', '이 카드에 아직 저장하지 않은 수정이 있어.', true)) return;
+        await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === card.id); if (index < 0) throw new Error('카드가 이미 삭제됐어.'); cards.splice(index, 1); });
+        if (state.cardId === card.id) fillCardDraft(); notify('보관한 카드를 삭제했어.');
+      }, 'btn ghost sm danger'));
+      node.append(actions); return node;
     }
-    $('baseline-view').addEventListener('click', () => { if (!inputPreset('base')) return; promptView.source = 'base'; $('prompt-search').value = ''; goStep('prompts'); });
-    $('prompt-search').addEventListener('input', renderPromptNav);
-    $('prompt-reference-source').addEventListener('change', () => { promptView.source = $('prompt-reference-source').value; const rows = promptRows(); if (!rows.some(row => row.key === promptView.key)) promptView.key = rows[0]?.key || ''; renderPromptNav(); renderPromptDetail(); });
-    $('prompt-font').addEventListener('change', () => { document.documentElement.style.setProperty('--prompt-font', $('prompt-font').value + 'px'); });
-    $('prompt-wrap').addEventListener('change', applyPromptWrap);
-    $('prompt-reset').addEventListener('click', guard(() => {
-      const row = selectedPromptRow(), w = state.work.preset; if (!row || !ready() || !w.promptDraft || state.exporting) return;
-      if (row.field) w.promptDraft[row.field] = clone(w.current.preset[row.field]);
-      else w.promptDraft.promptTemplate[row.index] = clone(w.current.preset.promptTemplate[row.index]);
-      markPromptEdit(); renderPromptNav(); renderPromptDetail();
-    }));
-
-    // ---- Files step -------------------------------------------------------------------------
-    function renderPromptBaseline() {
-      const manual = !!$('preset-base').value.trim(), base = inputPreset('base');
-      const origin = $('baseline-origin'), next = $('baseline-next'), name = $('baseline-name'), help = $('baseline-help');
-      origin.hidden = !base; origin.textContent = manual ? '직접 불러온 원본' : '보관한 원본';
-      $('baseline-view').disabled = !base;
-      if (base) {
-        name.textContent = base.name || (!manual && state.baseline?.label) || '(이름 없는 원본)';
-        help.textContent = '이 원본을 기준으로 내 커스텀본과 새 원본을 대조해서, 내 변경과 업데이트 변경을 구분해.';
-      } else if (manual) {
-        name.textContent = '직접 불러온 원본 확인 필요'; help.textContent = '직접 불러온 원본을 읽을 수 없어. 파일을 다시 불러와 줘.';
-      } else if (!state.archiveLoaded) {
-        name.textContent = '보관한 원본을 불러오는 중…'; help.textContent = '불러오기가 끝나면 이번 비교에 쓸 원본이 표시돼.';
-      } else if (!state.archiveAvailable) {
-        name.textContent = '보관한 원본 확인 필요'; help.textContent = '보관 저장소를 읽지 못했어. 보관함에서 새로고침하거나 고급 옵션에서 옛 원본을 직접 불러와 줘.';
-      } else {
-        name.textContent = '비교 기준 원본 없음 · 첫 비교';
-        help.textContent = '내 변경과 업데이트 변경을 자동으로 구분할 기준이 없어서, 차이가 있는 항목을 직접 골라야 해. 저장하면 새 원본이 다음 비교 기준으로 보관돼.';
-      }
-      next.hidden = !state.nextBaseline;
-      next.textContent = state.nextBaseline ? '다음 비교용으로 보관한 원본: ' + releaseName(state.nextBaseline) + ' · 이번 비교 기준은 그대로야.' : '';
+    function filteredCards(query) { const text = query.toLocaleLowerCase().trim(); return state.cards.filter(card => !text || (card.name + '\n' + card.text).toLocaleLowerCase().includes(text)); }
+    function renderCards() {
+      renderCardStatus(); const list = $('card-list'); list.replaceChildren();
+      filteredCards($('card-search').value).forEach(card => list.append(snippetNode(card, false)));
+      if (!list.childElementCount) list.append(el('p', state.cards.length ? '검색 결과가 없어.' : '아직 저장한 카드가 없어.', 'empty'));
     }
-    function renderFiles() {
-      const isPreset = state.mode === 'preset';
-      $('files-preset').hidden = !isPreset; $('files-toggle').hidden = isPreset;
-      if (isPreset) {
-        const missing = [!inputPreset('local') && '내 커스텀본', !inputPreset('latest') && '새 원본'].filter(Boolean);
-        $('run-preset').disabled = !state.archiveLoaded || missing.length > 0 || state.exporting || state.storing;
-        $('run-preset').textContent = merged() ? '다시 병합하기' : '프리셋 병합하기';
-        $('files-hint').textContent = !state.archiveLoaded ? '보관한 원본을 불러오는 중이야…' : missing.length ? missing.join('과 ') + ' 파일을 불러오면 병합할 수 있어.' :
-          active().stale && active().current ? '입력이 바뀌었어. 다시 병합해 줘.' : merged() ? '병합 결과가 있어. 위의 단계 탭에서 이어서 작업해.' : '준비됐어. 병합 버튼을 눌러 줘.';
-        renderPromptBaseline();
-      } else {
-        const hasLatest = !!$('toggle-latest').value.trim() || !!state.filePresets['toggle-latest'];
-        $('run-toggle').disabled = !hasLatest || state.exporting || state.storing;
-        $('run-toggle').textContent = merged() ? '다시 병합하기' : '토글 편집하기';
-        $('toggle-hint').textContent = !hasLatest ? '새 원본 토글을 불러오면 시작할 수 있어.' : active().stale && active().current ? '입력이 바뀌었어. 다시 병합해 줘.' : merged() ? '결과가 있어. 위의 단계 탭에서 이어서 작업해.' : '준비됐어.';
-      }
+    function renderSide() {
+      const list = $('side-list'), scrollTop = list.scrollTop; list.replaceChildren();
+      filteredCards($('side-search').value).forEach(card => list.append(snippetNode(card, true)));
+      if (!list.childElementCount) list.append(el('p', !state.cardsReady ? '보관함을 읽지 못했어. 플러그인을 다시 열어 줘.' : state.cards.length ? '검색 결과가 없어.' : '저장한 카드가 없어. ＋ 카드 작성으로 구문을 보관해.', 'empty'));
+      list.scrollTop = scrollTop;
     }
-
-    // ---- Toggle editor ----------------------------------------------------------------------
-    const STATUS_CLASS = { '신규': 'new', '변경': 'changed', '미포함': 'missing', '커스텀 추가': 'custom' };
-    const favorite = () => active().groups.find(g => g.uid === active().favoriteUid);
-    const favKeys = () => new Set((favorite()?.items || []).filter(it => it.type === 'item').map(it => it.key));
-    function optionPills(item, report) {
-      const wrap = el('div', null, 'pills');
-      item.options?.forEach(opt => wrap.appendChild(el('span', opt || '(빈 선택지)', 'pill' + (report && !report.oldOptions.includes(opt) ? ' added' : ''))));
-      return wrap;
+    async function replaceDocument(preset, fileName) {
+      if (isDirty() && !await confirmAction('다른 프리셋을 열까?', '현재 편집한 내용이 있어. 필요한 경우 완성본을 다운로드한 뒤 열어 줘.', true)) return;
+      const clean = C.sanitizePreset(C.parsePreset(JSON.stringify(preset)));
+      state.original = clone(clean); state.draft = clone(clean); state.fileName = fileName;
+      state.meta = (clean.promptTemplate || []).map(block => ({ id: uid(), original: clone(block), custom: false }));
+      state.selected = ''; state.editing = ''; state.history = []; state.future = []; state.historyGroup = ''; state.saved = ''; collapsed.clear();
+      state.meta.forEach(meta => collapsed.add(meta.id));
+      tab('edit'); renderDocument(); notify('프리셋을 열었어. 본문을 읽고 직접 편집해 봐.');
     }
-    function changed() { const w = active(); w.manual = true; if (w.current) w.current.savedRecord = null; render(); }
-    function ensureFavorite() {
-      const w = active(); let g = favorite();
-      if (!g) { g = { uid: 'g' + (++uid), name: '⭐내 즐겨찾기', explicit: true, items: [] }; w.groups.unshift(g); w.favoriteUid = g.uid; }
-      return g;
+    async function openPreset(file) {
+      if (!file || state.busy) return;
+      if (file.size > 10 * 1024 * 1024) throw new Error('프리셋 파일은 10MB 이하로 열어 줘.');
+      state.busy = true; updateStatus();
+      try { await replaceDocument(await C.importPresetFile(file), file.name); } finally { state.busy = false; updateStatus(); }
     }
-    function homeGroup(key, excluded) {
-      const w = active(), home = w.homes.get(key) || { name: '기타', explicit: true };
-      let other = w.groups.find(x => x !== excluded && x.name === home.name && x.explicit === home.explicit);
-      if (!other) {
-        other = { uid: 'g' + (++uid), name: home.name === excluded?.name ? '기타' : home.name, explicit: home.explicit, items: [] };
-        w.groups.push(other);
-      }
-      return other;
+    function download(name, data, type) {
+      const url = URL.createObjectURL(new Blob([data], { type })), a = el('a'); a.href = url; a.download = name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
     }
-    function addFavorite(keys) {
-      if (!ready()) return;
-      const w = active(), target = ensureFavorite(), keep = migrationOptions(state.mode).keepInOriginal;
-      let count = 0;
-      keys.forEach(key => {
-        if (target.items.some(it => it.type === 'item' && it.key === key) || !w.catalog.has(key)) return;
-        if (!keep) w.groups.forEach(g => { if (g !== target) g.items = g.items.filter(it => it.type !== 'item' || it.key !== key); });
-        target.items.push(clone(w.catalog.get(key))); count++;
-      });
-      w.selected.clear(); changed(); notify(count + '개를 즐겨찾기에 담았어.', 'ok');
-    }
-    function removeFavorite(key) {
-      const w = active(), g = favorite(); if (!g) return;
-      const item = g.items.find(it => it.type === 'item' && it.key === key);
-      g.items = g.items.filter(it => it.type !== 'item' || it.key !== key);
-      if (item && !w.groups.some(x => x.items.some(it => it.type === 'item' && it.key === key))) homeGroup(key, g).items.push(item);
-      changed();
-    }
-    ['preset', 'toggle'].forEach(mode => $(mode + '-keep').addEventListener('change', () => {
-      const w = state.work[mode];
-      if (state.mode !== mode || !w.current || w.stale || unresolved()) { invalidate(mode); return; }
-      const fav = favorite();
-      if (fav) {
-        if ($(mode + '-keep').checked) fav.items.filter(it => it.type === 'item').forEach(it => {
-          const target = homeGroup(it.key, fav);
-          if (!target.items.some(x => x.type === 'item' && x.key === it.key)) target.items.push(clone(it));
-        });
-        else { const keys = favKeys(); w.groups.forEach(g => { if (g !== fav) g.items = g.items.filter(it => it.type !== 'item' || !keys.has(it.key)); }); }
-      }
-      changed(); notify('즐겨찾기와 직접 조정한 배치는 그대로 두고 중복 표시 옵션만 적용했어.', 'ok');
-    }));
-    function renderCatalog() {
-      const w = active(), list = $('catalog'); list.replaceChildren();
-      const keys = favKeys(), query = $('search').value.toLowerCase().trim(), filter = $('filter').value;
-      for (const [key, item] of w.catalog) {
-        if (query && ![key, item.label, ...(item.options || [])].join(' ').toLowerCase().includes(query)) continue;
-        const inFav = keys.has(key);
-        if (filter === 'fav' && !inFav || filter === 'other' && inFav) continue;
-        const card = el('div', null, 'citem' + (inFav ? ' in-fav' : '')); card.draggable = true;
-        card.addEventListener('dragstart', e => { state.drag = { key }; e.dataTransfer.setData('text/plain', key); e.dataTransfer.effectAllowed = 'copy'; });
-        card.addEventListener('dragend', () => { state.drag = null; });
-        const row = el('div', null, 'row'), checkbox = el('input'), title = el('div', null, 'grow');
-        checkbox.type = 'checkbox'; checkbox.checked = w.selected.has(key); checkbox.setAttribute('aria-label', key + ' 선택');
-        checkbox.addEventListener('change', () => { if (checkbox.checked) w.selected.add(key); else w.selected.delete(key); });
-        title.append(el('div', key, 'key'), el('div', item.label, 'label'));
-        const toggle = button(inFav ? '✓ 담김' : '★ 담기', () => inFav ? removeFavorite(key) : addFavorite([key]), 'btn sm' + (inFav ? ' on' : ''));
-        toggle.setAttribute('aria-label', key + (inFav ? ' 즐겨찾기에서 빼기' : ' 즐겨찾기에 담기')); toggle.title = inFav ? '눌러서 즐겨찾기에서 빼기' : '즐겨찾기에 담기';
-        row.append(checkbox, title, toggle);
-        const report = w.current.toggles.changes.find(c => c.key === key), meta = el('div', null, 'pills');
-        meta.append(el('span', item.control.toUpperCase(), 'badge')); if (report && report.status !== '동일') meta.append(el('span', report.status, 'badge ' + (STATUS_CLASS[report.status] || '')));
-        card.append(row, meta, optionPills(item, report)); list.appendChild(card);
-      }
-      if (!list.childElementCount) list.appendChild(el('div', '표시할 토글이 없어.', 'empty'));
-    }
-    function moveItem(sourceUid, sourceIndex, targetUid, targetIndex) {
-      const w = active(), source = w.groups.find(g => g.uid === sourceUid), target = w.groups.find(g => g.uid === targetUid);
-      if (!source || !target || !source.items[sourceIndex]) return;
-      const [item] = source.items.splice(sourceIndex, 1);
-      if (source === target && sourceIndex < targetIndex) targetIndex--;
-      target.items.splice(Math.max(0, Math.min(targetIndex, target.items.length)), 0, item); changed();
-    }
-    function dropAt(e, group, index) {
-      if (!state.drag || !ready()) return;
-      e.preventDefault(); e.stopPropagation();
-      if (state.drag.key) {
-        const w = active(), it = w.catalog.get(state.drag.key);
-        if (it && !group.items.some(x => x.key === it.key)) {
-          if (!migrationOptions(state.mode).keepInOriginal) w.groups.forEach(g => { g.items = g.items.filter(x => x.type !== 'item' || x.key !== it.key); });
-          group.items.splice(Math.min(index, group.items.length), 0, clone(it)); changed();
-        }
-      } else moveItem(state.drag.uid, state.drag.index, group.uid, index);
-      state.drag = null;
-    }
-    const iconButton = (text, label, fn, disabled = false, extra = '') => { const b = button(text, fn, 'btn ghost sm icon' + extra); b.setAttribute('aria-label', label); b.title = label; b.disabled = disabled; return b; };
-    function renderGroups() {
-      const w = active(), list = $('groups'); list.replaceChildren();
-      w.groups.forEach((group, gIndex) => {
-        const isFav = group.uid === w.favoriteUid, collapsed = w.collapsed.has(group.uid), gname = group.name || '그룹 밖';
-        const box = el('div', null, 'group' + (isFav ? ' favorite' : '')), head = el('div', null, 'group-head');
-        const fold = iconButton(collapsed ? '▸' : '▾', gname + (collapsed ? ' 펼치기' : ' 접기'), () => { if (collapsed) w.collapsed.delete(group.uid); else w.collapsed.add(group.uid); renderGroups(); });
-        fold.setAttribute('aria-expanded', String(!collapsed));
-        const star = iconButton(isFav ? '★' : '☆', isFav ? gname + ' 즐겨찾기 지정 해제' : gname + ' 그룹을 즐겨찾기로 지정', () => { w.favoriteUid = isFav ? '' : group.uid; changed(); }, false, isFav ? ' on' : ''); star.setAttribute('aria-pressed', String(isFav));
-        head.append(fold, el('span', gname + ' · ' + group.items.filter(it => it.type === 'item').length, 'name'), star,
-          iconButton('↑', gname + ' 그룹 위로', () => { if (gIndex > 0) { [w.groups[gIndex - 1], w.groups[gIndex]] = [w.groups[gIndex], w.groups[gIndex - 1]]; changed(); } }, gIndex === 0),
-          iconButton('↓', gname + ' 그룹 아래로', () => { if (gIndex < w.groups.length - 1) { [w.groups[gIndex + 1], w.groups[gIndex]] = [w.groups[gIndex], w.groups[gIndex + 1]]; changed(); } }, gIndex === w.groups.length - 1),
-          menu(gname + ' 그룹 메뉴', [
-            { text: '이름 바꾸기', fn: guard(async () => {
-              const input = await askText('그룹 이름 바꾸기', '그룹 이름', group.name || '기본'); const name = input == null ? '' : String(input).trim(); if (!name) return;
-              if (/[=\r\n]/.test(name)) { notify('그룹 이름에 = 또는 줄바꿈은 넣을 수 없어.', 'error'); return; }
-              group.name = name; group.explicit = true; changed(); }) },
-            { text: '구분선 추가', fn: () => { group.items.unshift({ type: 'divider', raw: '==divider' }); changed(); } },
-            { text: '그룹 삭제', danger: true, disabled: isFav, fn: guard(async () => { if (await ask('그룹을 삭제할까?', '이 그룹과 포함된 항목을 결과에서 삭제해. 카탈로그에서 다시 담을 수 있어.', '삭제', true)) { w.groups.splice(gIndex, 1); changed(); } }) }]));
-        const body = el('div', null, 'group-body'); body.hidden = collapsed;
-        body.addEventListener('dragover', e => { if (state.drag) { e.preventDefault(); body.classList.add('over'); } });
-        body.addEventListener('dragleave', () => body.classList.remove('over'));
-        body.addEventListener('drop', e => dropAt(e, group, group.items.length));
-        group.items.forEach((item, index) => {
-          const card = el('div', null, 'tcard' + (item.type === 'divider' ? ' divider' : item.type === 'raw' ? ' raw' : '')); card.draggable = true;
-          const name = item.key || (item.type === 'divider' ? '구분선' : '텍스트');
-          card.addEventListener('dragstart', e => { state.drag = { uid: group.uid, index }; e.dataTransfer.setData('text/plain', item.key || item.type); e.dataTransfer.effectAllowed = 'move'; card.classList.add('dragging'); });
-          card.addEventListener('dragend', () => { state.drag = null; card.classList.remove('dragging'); });
-          card.addEventListener('dragover', e => { if (state.drag) e.preventDefault(); }); card.addEventListener('drop', e => dropAt(e, group, index));
-          const row = el('div', null, 'row spread');
-          if (item.type === 'item') { const label = el('div', null, 'grow'); label.append(el('div', item.key, 'key'), el('div', item.label, 'label')); row.appendChild(label); }
-          else row.appendChild(el('span', item.type === 'divider' ? '── 구분선 ──' : item.raw || '(빈 줄)', 'grow'));
-          const controls = el('div', null, 'controls');
-          controls.append(iconButton('↑', name + ' 위로', () => moveItem(group.uid, index, group.uid, index - 1), index === 0),
-            iconButton('↓', name + ' 아래로', () => moveItem(group.uid, index, group.uid, index + 2), index === group.items.length - 1));
-          const target = el('select'); target.setAttribute('aria-label', name + ' 다른 그룹으로 이동');
-          w.groups.forEach(g => { const op = el('option', g.name || '그룹 밖'); op.value = g.uid; target.appendChild(op); }); target.value = group.uid;
-          target.addEventListener('change', () => moveItem(group.uid, index, target.value, w.groups.find(g => g.uid === target.value).items.length));
-          controls.append(target, iconButton('×', name + ' 결과에서 빼기', () => { group.items.splice(index, 1); changed(); }));
-          row.appendChild(controls); card.appendChild(row);
-          if (item.type === 'item') card.appendChild(optionPills(item, w.current.toggles.changes.find(c => c.key === item.key)));
-          body.appendChild(card);
-        });
-        if (!group.items.length) body.appendChild(el('div', '토글을 여기로 끌어다 놓거나 카탈로그에서 담아 줘.', 'empty'));
-        box.append(head, body); list.appendChild(box);
-      });
-      if (!list.childElementCount) list.appendChild(el('div', '아직 그룹이 없어. 그룹을 추가하거나 카탈로그에서 토글을 담아 줘.', 'empty'));
-    }
-    function renderToggles() {
-      const w = active(); if (!ready()) return;
-      renderCatalog(); renderGroups();
-      const changes = w.current.toggles.changes, added = changes.filter(c => c.status === '신규').length, missing = changes.filter(c => c.status === '미포함').length;
-      $('toggle-count').textContent = '즐겨찾기 ' + favKeys().size + '개 · 전체 ' + w.catalog.size + '개';
-      $('add-new').textContent = '신규 토글 모두 담기' + (added ? ' (' + added + ')' : ''); $('add-new').disabled = !added;
-      $('remove-missing').textContent = '새 원본에 없는 토글 제거' + (missing ? ' (' + missing + ')' : ''); $('remove-missing').disabled = !missing;
-      $('warnings').replaceChildren(); (w.current.warnings || []).forEach(text => $('warnings').appendChild(el('p', text, 'note')));
-      if (w.manual) $('warnings').appendChild(el('p', '결과 배치를 직접 수정했어. 지금 배치가 그대로 완성본에 들어가.', 'note'));
-      $('toggle-draft').value = C.serializeToggles(w.groups); $('toggle-draft').scrollTop = 0;
-    }
-    $('search').addEventListener('input', () => { if (ready()) renderCatalog(); });
-    $('filter').addEventListener('change', () => { if (ready()) renderCatalog(); });
-    $('add-selected').addEventListener('click', () => { const keys = [...active().selected]; if (!keys.length) { notify('담을 토글을 먼저 체크해 줘.'); return; } addFavorite(keys); });
-    $('add-new').addEventListener('click', () => addFavorite(active().current.toggles.changes.filter(c => c.status === '신규').map(c => c.key)));
-    $('remove-missing').addEventListener('click', guard(async () => {
-      const missing = new Set(active().current.toggles.changes.filter(c => c.status === '미포함').map(c => c.key));
-      if (!missing.size) { notify('새 원본에 없는 토글이 없어.'); return; }
-      if (!(await ask('새 원본에 없는 토글을 제거할까?', missing.size + '개 토글을 결과의 모든 그룹에서 빼. 내가 직접 만든 커스텀 토글일 수도 있으니 저장 단계의 변경 내역을 먼저 확인해 줘.', '제거', true))) return;
-      active().groups.forEach(g => { g.items = g.items.filter(it => it.type !== 'item' || !missing.has(it.key)); }); changed();
-    }));
-    $('add-group').addEventListener('click', guard(async () => {
-      const input = await askText('그룹 추가', '새 그룹 이름'); const name = input == null ? '' : String(input).trim(); if (!name) return;
-      if (/[=\r\n]/.test(name)) { notify('그룹 이름에 = 또는 줄바꿈은 넣을 수 없어.', 'error'); return; }
-      active().groups.push({ uid: 'g' + (++uid), name, explicit: true, items: [] }); changed();
-    }));
-    $('apply-toggle-text').addEventListener('click', guard(() => {
-      const text = $('toggle-draft').value, check = C.migrateToggles(null, text, text);
-      if (check.conflicts.length) throw new Error('같은 키가 서로 다른 정의로 중복돼 있어. 정의를 통일한 뒤 적용해 줘.');
-      const w = active(), prior = favorite(), index = w.groups.indexOf(prior);
-      w.groups = C.parseToggles(text);
-      w.favoriteUid = w.groups[index]?.name === prior?.name ? w.groups[index].uid : '';
-      w.groups.forEach(g => g.items.forEach(it => { if (it.type === 'item') w.catalog.set(it.key, clone(it)); })); changed(); notify('편집한 토글 텍스트를 적용했어.', 'ok');
-    }));
-    $('from-presets').addEventListener('click', guard(() => {
-      ['base', 'local', 'latest'].forEach(key => {
-        const preset = $('preset-' + key).value.trim() ? C.parsePreset($('preset-' + key).value) : key === 'base' ? state.baseline?.preset : null;
-        $('toggle-' + key).value = preset?.customPromptTemplateToggle || '';
-        if (preset) state.filePresets['toggle-' + key] = C.sanitizePreset(preset); else delete state.filePresets['toggle-' + key];
-        setSlotStatus('toggle-' + key, preset ? '프리셋 업데이트의 파일에서 가져옴' : '');
-      });
-      state.toggleBaseline = clone(state.baseline); state.nextToggleBaseline = null; refreshReleases();
-      updateFavoriteSelect('toggle', $('preset-fav').value); invalidate('toggle'); notify('프리셋 업데이트에 불러온 파일에서 토글 정의를 가져왔어.');
-    }));
-    function setSlotStatus(id, text) { const s = document.querySelector('[data-slot="' + id + '"] .file-status'); if (s) s.textContent = text; }
-
-    // ---- Save step --------------------------------------------------------------------------
-    function download(name, text, type) {
-      const url = URL.createObjectURL(new Blob([text], { type })), a = el('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    }
-    function currentOutput() {
-      const w = active(), text = C.serializeToggles(w.groups);
-      if (state.mode !== 'preset') return text;
-      const result = clone(w.promptDraft || w.current.preset);
-      if (own(result, 'customPromptTemplateToggle') || text.trim()) result.customPromptTemplateToggle = text;
-      result.name = $('preset-name').value.trim() || result.name;
-      C.parsePreset(JSON.stringify(result));
-      return JSON.stringify(C.sanitizePreset(result), null, 2);
-    }
-    function renderChecklist(w) {
-      const root = $('checklist'); root.replaceChildren();
-      const left = unresolved();
-      [[true, '병합을 마쳤어', null],
-        [left === 0, left ? '풀지 못한 충돌이 ' + left + '개 남았어' : '충돌을 모두 해결했어', left ? ['충돌 보러 가기', () => goStep('conflicts')] : null],
-        [null, w.manual ? '직접 편집한 내용이 있어. 지금 상태 그대로 저장돼.' : '직접 편집한 내용은 없어.', null],
-        [w.current.savedRecord ? true : null, w.current.savedRecord ? '저장했고 기준 원본을 새 원본으로 교체했어.' : '아직 저장하지 않았어.', null]].forEach(([ok, text, action]) => {
-        const li = el('li'); li.dataset.ok = String(ok); li.append(el('span', ok === true ? '✓' : ok === false ? '!' : '–', 'dot'), el('span', text, 'grow'));
-        if (action) li.append(button(action[0], action[1], 'btn sm')); root.append(li);
-      });
-    }
-    function renderReport() {
-      const w = active(), changes = w.current?.toggles.changes || [], root = $('report'); root.replaceChildren();
-      const diff = changes.filter(c => c.status !== '동일');
-      $('report-panel').hidden = !w.current || w.stale;
-      $('report-title').textContent = '변경 내역 대조 · 토글 ' + diff.length + '개' + (state.mode === 'preset' ? ' / 프롬프트 커스텀 보존 ' + (w.current?.changes.length || 0) + '개' : '');
-      if (diff.length) {
-        const table = el('table'), head = el('tr'); ['상태 · 키', '내 정의', '새 원본 정의'].forEach(t => head.appendChild(el('th', t))); table.appendChild(head);
-        diff.forEach(c => {
-          const tr = el('tr'), status = el('td'), old = el('td'), latest = el('td');
-          status.append(el('span', c.status, 'badge ' + (STATUS_CLASS[c.status] || '')), el('div', c.key, 'key'));
-          old.appendChild(el('pre', c.local)); latest.appendChild(el('pre', c.latest));
-          c.oldOptions.filter(x => !c.newOptions.includes(x)).forEach(x => old.appendChild(el('span', x, 'pill removed')));
-          c.newOptions.filter(x => !c.oldOptions.includes(x)).forEach(x => latest.appendChild(el('span', x, 'pill added')));
-          tr.append(status, old, latest); table.appendChild(tr);
-        }); root.appendChild(table);
-      } else root.appendChild(el('p', '달라진 토글이 없어.', 'hint'));
-      (w.current?.changes || []).forEach(c => root.appendChild(el('p', (promptLabels[c.key] || c.key) + ' · ' + c.status, 'hint')));
-    }
-    function renderSave() {
-      const w = active(), mode = state.mode, isPreset = mode === 'preset';
-      if (!w.current) return;
-      const valid = ready(), binaryOutput = isPreset || (mode === 'toggle' && !!w.current.release);
-      $('save-title').textContent = valid ? '저장' : '저장 전에 확인할 게 있어';
-      $('save-lead').textContent = isPreset ? '프롬프트 편집 내용과 토글 배치를 .risup 파일로 저장해. 저장하면 기준 원본이 새 원본으로 바뀌고, 내 커스텀 완성본도 보관함에 남아.' :
-        binaryOutput ? '새 원본 프리셋에 결과 토글을 넣어 .risup으로 저장해. 저장하면 기준 토글과 완성본이 보관함에 남아. 아래 텍스트는 토글만 복사할 때 써.' :
-          '완성 토글 텍스트를 .txt로 저장하거나 복사해서 RisuAI의 커스텀 프롬프트 토글 입력란에 붙여넣어. 저장하면 토글 비교 기준도 새 정의로 바뀌어.';
-      renderChecklist(w);
-      $('save-names').hidden = !isPreset; $('output').hidden = isPreset; $('copy-output').hidden = isPreset; $('next-update').parentElement.hidden = !isPreset;
-      $('copy-output').disabled = !valid; $('download-output').disabled = !valid || state.exporting || state.storing; $('next-update').disabled = !valid || state.exporting || !w.current.savedRecord;
-      $('download-output').textContent = state.exporting ? '파일 만드는 중…' : binaryOutput ? '.risup 파일로 저장' : '.txt 파일로 저장';
-      $('output-help').textContent = isPreset ? '“다음 업데이트 준비”는 저장한 뒤에 쓸 수 있어. 완성본이 내 커스텀본이 되고 방금 쓴 새 원본이 비교 기준이 돼.' : '';
-      $('output-help').className = 'hint';
-      try { $('output').value = currentOutput(); }
-      catch (e) { $('download-output').disabled = $('copy-output').disabled = $('next-update').disabled = true; $('output').value = ''; $('output-help').textContent = '결과 형식을 확인해 줘: ' + e.message; $('output-help').className = 'hint warn-text'; }
-      renderReport();
-    }
-    $('download-output').addEventListener('click', guard(async () => {
-      if (state.exporting || state.storing) return;
-      if (!ready()) throw new Error('충돌을 해결하고 다시 병합한 뒤 저장해 줘.');
-      const text = currentOutput(), mode = state.mode;
-      const current = active().current, release = clone(current.release), releaseId = current.releaseId;
-      const releaseLabel = mode === 'preset' ? $('release-label').value.trim() || current.releaseLabel : current.releaseLabel;
-      const preset = mode === 'preset' ? C.parsePreset(text) : release ? { ...clone(release), customPromptTemplateToggle: text, name: (release.name || '프리셋') + ' · 커스텀 토글' } : null;
-      const name = preset ? String(preset.name || 'risu').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_') + '_preset.risup' : 'risu_toggles.txt';
-      state.exporting = true; renderSave();
+    $('tab-edit').addEventListener('click', () => tab('edit')); $('tab-cards').addEventListener('click', () => tab('cards'));
+    root.querySelector('[role=tablist]').addEventListener('keydown', event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) { event.preventDefault(); tab(event.key === 'Home' ? 'edit' : event.key === 'End' ? 'cards' : state.tab === 'edit' ? 'cards' : 'edit', true); } });
+    $('manage-cards').addEventListener('click', () => tab('cards'));
+    $('new-card').addEventListener('click', guard(() => openCardDraft())); $('new-side').addEventListener('click', guard(() => openCardDraft()));
+    const cardInputChanged = () => { state.cardMessage = ''; state.cardError = false; renderCardStatus(); };
+    $('card-name').addEventListener('input', cardInputChanged); $('card-text').addEventListener('input', cardInputChanged);
+    // Sandboxed frames can block submission before a submit handler runs. Save directly on click.
+    $('card-save').addEventListener('click', guard(async () => {
+      if (state.cardBusy) return;
+      const id = state.cardId, name = $('card-name').value.trim(), text = $('card-text').value;
+      const settings = { ...state.cardSettings };
       try {
-        const bytes = preset ? await C.exportPresetFile(preset) : text;
-        download(name, bytes, preset ? 'application/octet-stream' : 'text/plain;charset=utf-8');
-        try {
-          const record = await archiveRelease(release, releaseId, releaseLabel, { personalPreset: preset,
-            toggleBaseline: mode === 'preset' ? release.customPromptTemplateToggle || '' : current.toggleSource,
-            personalToggles: mode === 'preset' ? preset.customPromptTemplateToggle || '' : text });
-          current.savedRecord = state.mode === mode && active().current === current && !active().stale && currentOutput() === text ? clone(record) : null; current.releaseId = record.id;
-          if (mode === 'toggle') state.nextToggleBaseline = clone(record); else state.nextBaseline = clone(record);
-          notify('파일을 저장하고 기준 원본을 새 원본으로 교체했어. 내 커스텀 완성본도 보관했어.', 'ok');
-        } catch (e) { notify('파일은 만들었지만 기준 원본 교체에 실패했어: ' + e.message + ' 보관함에서 새로고침해서 저장소를 확인해 줘.', 'error'); }
-      } finally { state.exporting = false; render(); }
+        if (!name || (cardUsesText(settings.type) && !text.trim())) { (!name ? $('card-name') : $('card-text')).focus(); throw new Error('카드 이름과 구문을 입력해 줘.'); }
+        const savedId = id || uid();
+        await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === savedId); if (id && index < 0) throw new Error('수정할 카드가 없어. 새 카드로 작성해 줘.'); const card = { id: savedId, name, text, ...settings }; if (index < 0) cards.push(card); else cards[index] = card; });
+        fillCardDraft(savedId, { name, text, ...settings }); state.cardMessage = '“' + name + '” 카드를 저장했어.'; renderCardStatus(); notify('커스텀 카드를 보관했어.');
+      } catch (error) { state.cardMessage = '저장하지 못했어: ' + error.message; state.cardError = true; renderCardStatus(); notify(state.cardMessage, true); }
     }));
-    $('copy-output').addEventListener('click', guard(async () => {
-      if (!ready() || state.mode === 'preset') return;
-      const text = currentOutput();
-      try { await navigator.clipboard.writeText(text); }
-      catch (_) {
-        $('output').focus(); $('output').select();
-        if (!document.execCommand('copy')) throw new Error('자동 복사가 막혀 있어. 선택된 텍스트를 Ctrl+C로 복사해 줘.');
-      }
-      notify('토글 텍스트를 복사했어.', 'ok');
-    }));
-    $('next-update').addEventListener('click', guard(() => {
-      if (!ready() || state.mode !== 'preset' || state.exporting) return;
-      const result = currentOutput(), record = active().current.savedRecord;
-      if (!record) throw new Error('완성본을 먼저 저장해 줘. 기준 원본 교체는 저장할 때만 처리해.');
-      state.baseline = clone(record); state.nextBaseline = null; $('preset-base').value = '';
-      $('preset-local').value = result; $('preset-latest').value = ''; $('preset-name').value = '';
-      delete state.filePresets['preset-local']; delete state.filePresets['preset-latest'];
-      setSlotStatus('preset-local', '직전에 저장한 완성본'); setSlotStatus('preset-latest', ''); setSlotStatus('preset-base', '');
-      updateFavoriteSelect('preset'); refreshReleases();
-      state.work.preset = fresh(); state.step.preset = 'files'; render();
-      notify('직전 완성본을 내 커스텀본으로, 방금 쓴 새 원본을 비교 기준으로 설정했어. 다음 업데이트 파일만 불러오면 돼!', 'ok');
-    }));
-
-    // ---- Whole-screen render ---------------------------------------------------------------
-    function render() {
-      inputIds.concat('library-source').forEach(refreshSlot);
-      const mode = state.mode;
-      if (!stepEnabled(state.step[mode])) state.step[mode] = 'files';
-      const cur = state.step[mode];
-      renderChrome();
-      ['files', 'conflicts', 'prompts', 'toggles', 'save'].forEach(s => { $('step-' + s).hidden = s !== cur; });
-      ({ files: renderFiles, conflicts: renderConflicts, prompts: renderPromptViewer, toggles: renderToggles, save: renderSave })[cur]();
-      renderStepNav();
-    }
-
-    // ---- Work files (save / restore) -------------------------------------------------------
-    const storageKey = 'preset-editor:project:v1';
-    function project() {
-      const inputs = {}, options = {}, work = {};
-      inputIds.forEach(id => {
-        let text = $(id).value;
-        if (id.startsWith('preset') && text.trim()) text = JSON.stringify(C.sanitizePreset(C.parsePreset(text)), null, 2);
-        inputs[id] = text;
-      });
-      optionIds.forEach(id => { options[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value; });
-      Object.entries(state.work).forEach(([mode, w]) => { work[mode] = { choices: clone(w.choices),
-        processed: !!w.current && !w.stale, draft: w.current && !w.stale ? C.serializeToggles(w.groups) : null,
-        favoriteIndex: w.groups.findIndex(g => g.uid === w.favoriteUid), manual: w.manual, savedRecord: clone(w.current?.savedRecord || null),
-        promptDraft: mode === 'preset' && w.promptDraft && !w.stale ? C.sanitizePreset(w.promptDraft) : null }; });
-      return { type: 'preset-editor-project', version: 2, mode: state.mode, inputs, options, work, baseline: clone(state.baseline), toggleBaseline: clone(state.toggleBaseline), toggleBaseManaged: state.toggleBaseManaged === true,
-        filePresets: clone(Object.fromEntries(inputIds.filter(id => own(state.filePresets, id)).map(id => [id, state.filePresets[id]]))) };
-    }
-    async function restore(data) {
-      if (!object(data) || data.type !== 'preset-editor-project' || ![1, 2].includes(data.version) || !object(data.inputs) || !object(data.options)) throw new Error('에디터에서 저장한 작업 파일이 필요해.');
-      // v1 files had a separate favorites-builder tab. It is now the toggle editor with an empty "my toggles" slot.
-      const inputs = { ...data.inputs };
-      if (data.mode === 'builder' && typeof inputs['builder-source'] === 'string' && !String(inputs['toggle-latest'] || '').trim()) inputs['toggle-latest'] = inputs['builder-source'];
-      if (inputIds.some(id => typeof inputs[id] !== 'string')) throw new Error('작업 파일의 입력 데이터가 올바르지 않아.');
-      if (data.baseline != null) C.validateReleases({ type: 'risu-preset-release-archive', version: 1, entries: [data.baseline] });
-      if (data.toggleBaseline != null) C.validateReleases({ type: 'risu-preset-release-archive', version: 1, entries: [data.toggleBaseline] });
-      const restoredPrompt = data.work?.preset?.promptDraft == null ? null : C.sanitizePreset(C.parsePreset(JSON.stringify(data.work.preset.promptDraft)));
-      const restoredPresets = {};
-      if (object(data.filePresets)) for (const id of inputIds) if (data.filePresets[id] != null) {
-        const preset = C.sanitizePreset(C.parsePreset(JSON.stringify(data.filePresets[id])));
-        if (!id.startsWith('toggle') || (preset.customPromptTemplateToggle || '') === inputs[id]) restoredPresets[id] = preset;
-      }
-      if ((active().manual || inputIds.some(id => $(id).value.trim())) && !(await ask('작업을 바꿀까?', '지금 입력과 결과를 저장한 작업으로 바꿔.', '바꾸기', true))) return;
-      inputIds.forEach(id => { $(id).value = inputs[id]; setSlotStatus(id, ''); });
-      // Old v1 projects had a required explicit baseline. New projects pin their own saved basis.
-      state.baseline = data.baseline ? clone(data.baseline) : null; state.nextBaseline = null;
-      state.toggleBaseline = clone(data.toggleBaseline || null); state.nextToggleBaseline = null; state.filePresets = restoredPresets;
-      state.toggleBaseManaged = data.toggleBaseManaged === true;
-      $('preset-options').open = !!$('preset-base').value.trim(); refreshReleases();
-      updateFavoriteSelect('preset', data.options['preset-fav']); updateFavoriteSelect('toggle', data.options['toggle-fav']);
-      optionIds.forEach(id => { if (id.endsWith('-fav')) return; if ($(id).type === 'checkbox') $(id).checked = data.options[id] === true; else $(id).value = typeof data.options[id] === 'string' ? data.options[id] : ''; });
-      const desired = data.mode === 'builder' ? 'toggle' : ['preset', 'toggle'].includes(data.mode) ? data.mode : 'preset';
-      ['preset', 'toggle'].forEach(mode => {
-        state.work[mode] = fresh(); state.mode = mode; state.step[mode] = 'files';
-        const saved = data.work?.[mode];
-        if (saved && object(saved.choices)) state.work[mode].choices = saved.choices;
-        if (saved?.processed && !(data.mode === 'builder' && mode === 'toggle')) {
-          run(); const w = state.work[mode];
-          if (mode === 'preset' && restoredPrompt && !unresolved()) w.promptDraft = clone(restoredPrompt);
-          if (saved.savedRecord) { C.validateReleases({ type: 'risu-preset-release-archive', version: 1, entries: [saved.savedRecord] }); w.current.savedRecord = clone(saved.savedRecord); }
-          if (!unresolved() && typeof saved.draft === 'string') {
-            w.groups = C.parseToggles(saved.draft); w.favoriteUid = w.groups[saved.favoriteIndex]?.uid || ''; w.manual = saved.manual === true;
-            w.groups.forEach(g => g.items.forEach(it => { if (it.type === 'item') w.catalog.set(it.key, clone(it)); }));
-          }
-          state.step[mode] = unresolved() ? 'conflicts' : mode === 'preset' ? 'prompts' : 'toggles';
-        }
-      });
-      switchMode(desired); notify('저장한 작업을 불러왔어. 입력과 결과 배치가 복원됐어.', 'ok');
-    }
-    $('save-project').addEventListener('click', guard(async () => {
-      const data = JSON.stringify(project());
-      if (api) await api.pluginStorage.setItem(storageKey, data); else localStorage.setItem(storageKey, data);
-      notify('작업을 앱에 저장했어. 입력 · 충돌 선택 · 수정한 배치가 함께 들어가.', 'ok');
-    }));
-    $('restore-project').addEventListener('click', guard(async () => {
-      const data = api ? await api.pluginStorage.getItem(storageKey) : localStorage.getItem(storageKey);
-      if (!data) throw new Error('앱에 저장한 작업이 없어. 작업 파일을 열어도 돼.');
-      await restore(C.parseJSON(data));
-    }));
-    $('export-project').addEventListener('click', guard(() => { download('risu_migration_project.json', JSON.stringify(project(), null, 2), 'application/json;charset=utf-8'); notify('작업 파일을 내보냈어.', 'ok'); }));
-    $('import-project').addEventListener('click', () => $('project-file').click());
-    $('project-file').addEventListener('change', guard(async () => {
-      const f = $('project-file').files[0]; if (!f) return; if (f.size > 10 * 1024 * 1024) throw new Error('작업 파일은 10MB 이하로 불러와 줘.');
-      try { await restore(C.parseJSON(await f.text())); } finally { $('project-file').value = ''; }
-    }));
-
-    // ---- Library (archive of baselines) ----------------------------------------------------
-    const releaseStorageKey = 'preset-editor:releases:v1', ARCHIVE_LIMIT = 32;
-    const emptyArchive = () => ({ type: 'risu-preset-release-archive', version: 1, activeId: '', entries: [] });
-    const readStorage = key => api ? api.pluginStorage.getItem(key) : Promise.resolve(localStorage.getItem(key));
-    const writeStorage = (key, value) => api ? api.pluginStorage.setItem(key, value) : Promise.resolve(localStorage.setItem(key, value));
-    const releaseName = entry => entry?.preset?.name || entry?.pendingPreset?.name || entry?.personalPreset?.name || entry?.label || '토글 전용';
-    const newId = () => globalThis.crypto?.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2);
-    function fillReleaseSelect(id, entries, selected, emptyLabel) {
-      const select = $(id); select.replaceChildren();
-      const first = el('option', emptyLabel); first.value = ''; select.appendChild(first);
-      entries.forEach(entry => { const option = el('option', entry.label + ' · ' + releaseName(entry)); option.value = entry.id; select.appendChild(option); });
-      select.value = selected || '';
-    }
-    function refreshReleases() {
-      const entries = state.archive.entries.slice();
-      if (state.baseline && !entries.some(entry => entry.id === state.baseline.id)) entries.push(state.baseline);
-      if (state.toggleBaseline && !entries.some(entry => entry.id === state.toggleBaseline.id)) entries.push(state.toggleBaseline);
-      fillReleaseSelect('release-select', entries, state.baseline?.id, '보관본 없음 · 첫 편집 / 새 프리셋');
-      fillReleaseSelect('toggle-release-select', entries, state.toggleBaseline?.id, '보관본 없음 · 파일 / 텍스트 사용');
-      fillReleaseSelect('library-select', state.archive.entries, $('library-select').value, '새 보관 항목 만들기');
-      if (!state.archiveLoaded) $('release-status').textContent = '보관한 원본을 불러오는 중이야…';
-      else if (!state.archiveAvailable) $('release-status').textContent = '보관 저장소를 읽지 못했어. 첫 편집이나 옛 원본 직접 불러오기는 가능하지만, 자동 보관은 저장소를 확인한 뒤에 쓸 수 있어.';
-      else if ($('preset-base').value.trim()) $('release-status').textContent = '이번 비교는 직접 불러온 옛 원본을 써. 비워 두면 선택한 보관본으로 비교해.';
-      else if (state.baseline?.preset) $('release-status').textContent = '이번 비교 기준: ' + releaseName(state.baseline) + ' · ' + new Date(state.baseline.savedAt).toLocaleString() + (state.nextBaseline ? ' / 다음 비교용 새 원본도 보관했어.' : '');
-      else $('release-status').textContent = state.nextBaseline ? '첫 편집의 새 원본을 보관했어: ' + state.nextBaseline.label + '. 다음 원본을 불러오거나 “다음 업데이트 준비”를 누르면 자동으로 비교해.' : '첫 사용이야. 차이가 있는 구문 · 블록을 직접 골라야 해. 저장하면 새 원본이 자동 보관돼.';
-      $('toggle-release-status').textContent = state.toggleBaseline ? '선택한 보관 항목: ' + state.toggleBaseline.label + '. “보관한 토글 불러오기”를 누르면 기준 · 내 커스텀본 · 대기 중인 새 원본을 가져와.' : '보관함에 저장한 항목을 고를 수 있어. 파일이나 토글 텍스트를 바로 불러와도 돼.';
-      renderPromptBaseline(); renderLibrary();
-    }
-    function prepareStoredBaseline(id) {
-      if (id === 'preset-latest' && state.nextBaseline && !$('preset-base').value.trim()) {
-        try {
-          const latest = C.sanitizePreset(C.parsePreset($('preset-latest').value));
-          if (!C.same(latest, state.nextBaseline.preset)) {
-            state.baseline = clone(state.nextBaseline); state.nextBaseline = null; $('preset-base').value = '';
-            $('release-label').value = state.baseline.label;
-          }
-        } catch (_) { /* Wait for a complete valid new input. */ }
-      }
-      if (id.startsWith('preset')) refreshReleases();
-      if (id === 'toggle-base') state.toggleBaseManaged = false;
-      if (id === 'toggle-latest' && state.nextToggleBaseline && state.toggleBaseManaged) {
-        if ($('toggle-latest').value !== state.nextToggleBaseline.toggleBaseline) {
-          state.toggleBaseline = clone(state.nextToggleBaseline); state.nextToggleBaseline = null;
-          $('toggle-base').value = state.toggleBaseline.toggleBaseline ?? state.toggleBaseline.preset?.customPromptTemplateToggle ?? '';
-        }
-      }
-      if (id.startsWith('toggle')) refreshReleases();
-    }
-    async function loadReleases() {
-      const raw = await readStorage(releaseStorageKey);
-      const archive = raw ? C.validateReleases(C.parseJSON(raw)) : emptyArchive();
-      state.archive = archive; state.archiveAvailable = true;
-      state.baseline = clone(archive.entries.find(entry => entry.id === archive.activeId) || null); state.nextBaseline = null;
-      state.toggleBaseline = clone(state.baseline); state.nextToggleBaseline = null;
-      fillReleaseSelect('library-select', archive.entries, archive.activeId, '새 보관 항목 만들기');
-      $('library-label').value = state.baseline?.label || '';
-      $('release-label').value = state.baseline?.label || '';
-    }
-    // Always re-read storage first so another open plugin instance's presets are preserved.
-    async function mutateArchive(mutator) {
-      if (!state.archiveAvailable) throw new Error('보관 저장소를 먼저 정상적으로 불러와야 해.');
-      const raw = await readStorage(releaseStorageKey);
-      const archive = raw ? C.validateReleases(C.parseJSON(raw)) : emptyArchive();
-      const result = mutator(archive);
-      const serialized = JSON.stringify(archive); C.validateReleases(C.parseJSON(serialized));
-      await writeStorage(releaseStorageKey, serialized); state.archive = archive;
-      return result;
-    }
-    const checkLimit = (archive, id) => { if (!archive.entries.some(entry => entry.id === id) && archive.entries.length >= ARCHIVE_LIMIT) throw new Error('보관함은 최대 ' + ARCHIVE_LIMIT + '개까지야. 안 쓰는 항목을 삭제해 줘.'); };
-    async function archiveRelease(preset, id, label, completed = {}) {
-      if (!id && state.nextBaseline && C.same(preset, state.nextBaseline.preset)) id = state.nextBaseline.id;
-      const record = await mutateArchive(archive => {
-        const previous = archive.entries.find(entry => entry.id === id);
-        const rec = { ...clone(previous || {}), id: id || newId(), label: String(label || preset?.name || '프리셋').slice(0, 200),
-          preset: preset ? C.sanitizePreset(C.parsePreset(JSON.stringify(preset))) : clone(previous?.preset || null), savedAt: new Date().toISOString() };
-        checkLimit(archive, rec.id);
-        rec.toggleBaseline = completed.toggleBaseline ?? preset?.customPromptTemplateToggle ?? '';
-        rec.personalToggles = completed.personalToggles ?? '';
-        if (completed.personalPreset) rec.personalPreset = C.sanitizePreset(C.parsePreset(JSON.stringify(completed.personalPreset)));
-        else if (rec.personalPreset) rec.personalPreset.customPromptTemplateToggle = rec.personalToggles;
-        if (rec.pendingPreset && preset && C.same(C.sanitizePreset(rec.pendingPreset), C.sanitizePreset(preset))) delete rec.pendingPreset;
-        const index = archive.entries.findIndex(entry => entry.id === rec.id);
-        if (index < 0) archive.entries.push(rec); else archive.entries[index] = rec;
-        archive.activeId = rec.id; return rec;
-      });
-      refreshReleases(); return record;
-    }
-    function storedEntry(id) {
-      const entry = state.archive.entries.find(entry => entry.id === id);
-      if (!entry) throw new Error('보관함에서 항목을 먼저 선택해 줘.');
-      return clone(entry);
-    }
-    function loadStoredPresets(id) {
-      const entry = storedEntry(id); state.baseline = clone(entry); state.nextBaseline = null;
-      $('preset-base').value = ''; $('release-label').value = entry.label;
-      $('preset-local').value = entry.personalPreset ? JSON.stringify(entry.personalPreset, null, 2) : '';
-      const latest = entry.pendingPreset || entry.preset;
-      $('preset-latest').value = latest ? JSON.stringify(latest, null, 2) : '';
-      delete state.filePresets['preset-local']; delete state.filePresets['preset-latest'];
-      setSlotStatus('preset-local', entry.personalPreset ? '보관함에서 불러옴' : ''); setSlotStatus('preset-latest', latest ? '보관함에서 불러옴' : ''); setSlotStatus('preset-base', '');
-      updateFavoriteSelect('preset'); refreshReleases(); invalidate('preset');
-      notify('보관한 커스텀본과 새 원본을 불러왔어.' + (!entry.personalPreset ? ' 내 커스텀본 파일도 불러와 줘.' : '') + (!entry.pendingPreset ? ' 업데이트가 있다면 새 원본 파일을 불러와 줘.' : ''), 'ok');
-    }
-    function loadStoredToggles(id) {
-      const entry = storedEntry(id); state.toggleBaseline = clone(entry); state.nextToggleBaseline = null;
-      const fullLatest = entry.pendingPreset || (entry.preset && (!own(entry, 'toggleBaseline') || (entry.preset.customPromptTemplateToggle || '') === entry.toggleBaseline) ? entry.preset : null);
-      const presets = { base: entry.preset, local: entry.personalPreset, latest: fullLatest };
-      const texts = { base: entry.toggleBaseline ?? entry.preset?.customPromptTemplateToggle ?? '',
-        local: entry.personalToggles ?? entry.personalPreset?.customPromptTemplateToggle ?? entry.preset?.customPromptTemplateToggle ?? '',
-        latest: fullLatest?.customPromptTemplateToggle ?? entry.toggleBaseline ?? '' };
-      for (const key of ['base', 'local', 'latest']) {
-        const input = 'toggle-' + key; $(input).value = texts[key]; setSlotStatus(input, '보관함에서 불러옴');
-        if (presets[key] && (presets[key].customPromptTemplateToggle || '') === texts[key]) state.filePresets[input] = clone(presets[key]); else delete state.filePresets[input];
-      }
-      state.toggleBaseManaged = true;
-      updateFavoriteSelect('toggle'); refreshReleases(); invalidate('toggle'); notify('보관한 기준 토글 · 내 즐겨찾기 · 새 원본 토글을 불러왔어. 배치를 확인하고 병합해 줘.', 'ok');
-    }
-    function renderLibrary() {
-      const entries = state.archive.entries;
-      $('library-count').hidden = !entries.length; $('library-count').textContent = String(entries.length);
-      $('store-library').disabled = !state.archiveAvailable || state.storing || state.exporting;
-      $('library-status').textContent = !state.archiveAvailable ? '보관 저장소를 읽지 못했어. 새로고침으로 다시 확인해 줘.' : state.storing ? '프리셋 파일을 보관하는 중이야…' : '보관 항목 ' + entries.length + ' / ' + ARCHIVE_LIMIT + '개';
-      const list = $('library-list'); list.replaceChildren();
-      if (!entries.length) list.appendChild(el('p', '아직 보관한 프리셋이 없어. 완성본을 저장하면 자동으로 쌓여.', 'empty'));
-      entries.forEach(entry => {
-        const current = state.baseline?.id === entry.id, card = el('article', null, 'entry' + (current ? ' current' : ''));
-        const head = el('div', null, 'row spread'), title = el('div', null, 'grow'); title.append(el('h3', entry.label), el('p', releaseName(entry), 'hint'));
-        head.append(title); if (current) head.append(el('span', '사용 중', 'badge custom')); card.append(head);
-        const facts = el('ul', null, 'facts');
-        [['기준 원본', entry.preset ? releaseName(entry) : own(entry, 'toggleBaseline') ? '토글 텍스트' : '없음'], ['내 커스텀본', entry.personalPreset || own(entry, 'personalToggles') ? '있음' : '없음'], ['새 원본 대기', entry.pendingPreset ? entry.pendingPreset.name || '이름 없음' : '없음']]
-          .forEach(([k, v]) => facts.append(el('li', k + ': ' + v, 'badge')));
-        const actions = el('div', null, 'row');
-        actions.append(
-          button('프리셋 업데이트에 쓰기', guard(() => { loadStoredPresets(entry.id); state.step.preset = 'files'; switchMode('preset'); closeLibrary(); }), 'btn sm primary'),
-          button('토글 편집에 쓰기', guard(() => { loadStoredToggles(entry.id); state.step.toggle = 'files'; switchMode('toggle'); closeLibrary(); }), 'btn sm'),
-          button('이름 변경', guard(() => renameEntry(entry)), 'btn sm ghost'), button('삭제', guard(() => deleteEntry(entry)), 'btn sm ghost danger'));
-        card.append(facts, actions); list.appendChild(card);
-      });
-    }
-    async function renameEntry(entry) {
-      const input = await outsideLibrary(() => askText('보관 이름 바꾸기', '보관 이름', entry.label)); const name = input == null ? '' : String(input).trim().slice(0, 200); if (!name) return;
-      await mutateArchive(archive => { const target = archive.entries.find(e => e.id === entry.id); if (!target) throw new Error('보관 항목을 찾지 못했어. 새로고침해 줘.'); target.label = name; });
-      if (state.baseline?.id === entry.id) { state.baseline.label = name; $('release-label').value = name; }
-      if (state.toggleBaseline?.id === entry.id) state.toggleBaseline.label = name;
-      refreshReleases(); notify('이름을 바꿨어.', 'ok');
-    }
-    async function deleteEntry(entry) {
-      if (!(await outsideLibrary(() => ask('보관 항목을 삭제할까?', '“' + entry.label + '”의 기준 원본 · 커스텀본 · 대기 중인 새 원본이 모두 지워져. 되돌릴 수 없어.', '삭제', true)))) return;
-      await mutateArchive(archive => { archive.entries = archive.entries.filter(e => e.id !== entry.id); if (archive.activeId === entry.id) archive.activeId = ''; });
-      if (state.baseline?.id === entry.id) { state.baseline = null; state.nextBaseline = null; $('release-label').value = ''; invalidate('preset'); }
-      if (state.toggleBaseline?.id === entry.id) { state.toggleBaseline = null; state.nextToggleBaseline = null; invalidate('toggle'); }
-      refreshReleases(); notify('보관 항목을 삭제했어.', 'ok');
-    }
-    const openLibrary = () => { const d = $('library'); if (typeof d.showModal === 'function') { if (!d.open) d.showModal(); } else d.setAttribute('open', ''); $('library-note').hidden = true; renderLibrary(); };
-    const closeLibrary = () => { const d = $('library'); if (d.open) { if (typeof d.close === 'function') d.close(); else d.removeAttribute('open'); } };
-    $('open-library').addEventListener('click', openLibrary);
-    $('library-close').addEventListener('click', closeLibrary);
-    $('library').addEventListener('click', e => { if (e.target === $('library')) closeLibrary(); });
-    $('load-stored-presets').addEventListener('click', guard(() => loadStoredPresets($('release-select').value)));
-    $('load-stored-toggles').addEventListener('click', guard(() => loadStoredToggles($('toggle-release-select').value)));
-    $('release-select').addEventListener('change', () => {
-      state.baseline = clone(state.archive.entries.find(entry => entry.id === $('release-select').value) || null); state.nextBaseline = null;
-      $('preset-base').value = ''; $('release-label').value = state.baseline?.label || ''; refreshReleases(); invalidate('preset');
+    $('card-search').addEventListener('input', renderCards); $('side-search').addEventListener('input', renderSide);
+    $('open-empty').addEventListener('click', () => { if (!state.busy) $('file').click(); });
+    $('file').addEventListener('change', guard(async () => { try { await openPreset($('file').files[0]); } finally { $('file').value = ''; } }));
+    $('welcome').addEventListener('dragover', event => { if (event.dataTransfer?.types.includes('Files')) { event.preventDefault(); $('open-empty').classList.add('dragover'); } });
+    $('welcome').addEventListener('dragleave', () => $('open-empty').classList.remove('dragover'));
+    $('welcome').addEventListener('drop', guard(async event => { if (!event.dataTransfer?.files.length) return; event.preventDefault(); $('open-empty').classList.remove('dragover'); await openPreset(event.dataTransfer.files[0]); }));
+    $('name').addEventListener('input', () => change(() => { state.draft.name = $('name').value; }, 'preset-name', false)); $('name').addEventListener('blur', () => { state.historyGroup = ''; });
+    $('undo').addEventListener('click', () => travel(state.history, state.future)); $('redo').addEventListener('click', () => travel(state.future, state.history));
+    root.addEventListener('keydown', event => {
+      if (event.key === 'Escape') endDrag();
+      if (state.tab !== 'edit' || event.target.matches('input,textarea,select,[contenteditable=true]') || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return;
+      event.preventDefault(); if (event.shiftKey) travel(state.future, state.history); else travel(state.history, state.future);
     });
-    $('toggle-release-select').addEventListener('change', () => {
-      state.toggleBaseline = clone(state.archive.entries.find(entry => entry.id === $('toggle-release-select').value) || null); state.nextToggleBaseline = null;
-      $('toggle-base').value = ''; state.toggleBaseManaged = true; refreshReleases(); invalidate('toggle');
+    $('toggle-panel').addEventListener('click', () => { state.panel = !state.panel; updateStatus(); });
+    $('add-block').addEventListener('click', addBlock);
+    $('font').addEventListener('change', () => document.documentElement.style.setProperty('--prompt-font', $('font').value + 'px'));
+    $('fold-all').addEventListener('click', () => { state.meta.forEach(meta => collapsed.add(meta.id)); renderBlocks(); });
+    $('unfold-all').addEventListener('click', () => { collapsed.clear(); renderBlocks(); });
+    $('blocks').addEventListener('dragover', event => {
+      const index = locateGap(event); if (index == null || state.busy) return;
+      event.preventDefault(); event.dataTransfer.dropEffect = state.drag.kind === 'card' ? 'copy' : 'move';
+      if (state.gap !== index) { $('blocks').querySelectorAll('.pe-gap.active').forEach(node => node.classList.remove('active')); $('blocks').querySelector('[data-index="' + index + '"].pe-gap')?.classList.add('active'); state.gap = index; }
+      scrollPointer = { x: event.clientX, y: event.clientY }; if (!autoScrollFrame) autoScrollFrame = requestAnimationFrame(autoScroll);
     });
-    $('library-select').addEventListener('change', () => { $('library-label').value = state.archive.entries.find(entry => entry.id === $('library-select').value)?.label || ''; });
-    $('reload-releases').addEventListener('click', guard(async () => { await loadReleases(); refreshReleases(); invalidate('preset'); invalidate('toggle'); notify('보관한 원본을 다시 불러왔어. 비교할 프리셋 종류가 맞는지 확인해 줘.', 'ok'); }));
-    $('store-library').addEventListener('click', guard(async () => {
-      if (state.storing || state.exporting) return;
-      if (!state.archiveAvailable) throw new Error('보관 저장소를 먼저 정상적으로 불러와야 해.');
-      const preset = C.sanitizePreset(C.parsePreset($('library-source').value));
-      const selected = $('library-select').value, role = $('library-role').value, label = $('library-label').value.trim();
-      state.storing = true; renderLibrary();
-      try {
-        const record = await mutateArchive(archive => {
-          const previous = archive.entries.find(entry => entry.id === selected);
-          if (selected && !previous) throw new Error('선택한 보관 항목이 없어. 새로고침해 줘.');
-          const rec = { ...clone(previous || {}), id: selected || newId(), label: (label || previous?.label || preset.name || '프리셋').slice(0, 200), savedAt: new Date().toISOString() };
-          checkLimit(archive, rec.id);
-          if (role === 'base') {
-            if (rec.preset) throw new Error('이미 기준 원본이 있어. 파일 종류를 “새 원본”으로 골라 보관해 줘. 기준 교체는 완성본을 저장할 때 처리돼.');
-            rec.preset = preset; if (!own(rec, 'toggleBaseline')) rec.toggleBaseline = preset.customPromptTemplateToggle || '';
-          } else if (role === 'personal') { rec.personalPreset = preset; rec.personalToggles = preset.customPromptTemplateToggle || ''; }
-          else if (role === 'latest') rec.pendingPreset = preset;
-          else throw new Error('보관할 파일 종류를 골라 줘.');
-          const index = archive.entries.findIndex(entry => entry.id === rec.id);
-          if (index < 0) archive.entries.push(rec); else archive.entries[index] = rec;
-          archive.activeId = rec.id; return rec;
-        });
-        fillReleaseSelect('library-select', state.archive.entries, record.id, '새 보관 항목 만들기'); refreshReleases();
-        notify(role === 'latest' ? '새 원본을 대기 상태로 보관했어. 기준 원본은 완성본을 저장할 때 교체돼.' : '프리셋 파일을 보관했어. 위 목록에서 바로 이어서 작업할 수 있어.', 'ok');
-      } finally { state.storing = false; renderLibrary(); }
+    $('blocks').addEventListener('dragleave', event => { if (!$('blocks').contains(event.relatedTarget)) { $('blocks').querySelectorAll('.pe-gap.active').forEach(node => node.classList.remove('active')); state.gap = null; scrollPointer = null; } });
+    $('blocks').addEventListener('drop', guard(event => {
+      const index = locateGap(event), drag = state.drag; if (index == null || !drag || state.busy) return;
+      event.preventDefault(); event.stopPropagation(); endDrag();
+      if (drag.kind === 'card') insertCard(drag.card, index); else move(state.meta.findIndex(meta => meta.id === drag.id), index);
     }));
-
-    // ---- Start ------------------------------------------------------------------------------
-    render();
+    $('download').addEventListener('click', guard(async () => {
+      if (state.busy || !state.draft) return;
+      const preset = C.sanitizePreset(C.parsePreset(JSON.stringify(state.draft))); state.busy = true; updateStatus();
+      try { const bytes = await C.exportPresetFile(preset), fileName = String(preset.name || '프리셋').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_') + '_preset.risup'; download(fileName, bytes, 'application/octet-stream'); state.saved = clone(preset); notify('완성 프리셋을 만들었어. RisuAI의 프리셋 가져오기로 적용해.'); }
+      finally { state.busy = false; updateStatus(); }
+    }));
+    const themePref = api?.safeLocalStorage || { getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value) };
+    try { const theme = await themePref.getItem('preset-editor:theme'); if (theme === 'dark' || theme === 'light') document.documentElement.dataset.theme = theme; } catch (_) { /* System theme remains available. */ }
+    $('theme').addEventListener('click', guard(async () => { const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme:dark)').matches; document.documentElement.dataset.theme = dark ? 'light' : 'dark'; try { await themePref.setItem('preset-editor:theme', dark ? 'light' : 'dark'); } catch (_) { /* Keep this session's theme. */ } }));
+    fillCardDraft(); renderDocument();
+    await loadCards();
     if (api) {
       $('close').hidden = false; $('close').addEventListener('click', guard(() => api.hideContainer()));
       const setting = await api.registerSetting('프리셋 에디터', async () => { await api.showContainer('fullscreen'); }, '🖊️', 'html');
-      await api.onUnload(async () => { if (setting?.id) await api.unregisterUIPart(setting.id); });
+      await api.onUnload(async () => { endDrag(); clearTimeout(feedbackTimer); if (setting?.id) await api.unregisterUIPart(setting.id); });
     }
-    try { await loadReleases(); }
-    catch (e) { state.archiveAvailable = false; notify('보관한 원본을 읽지 못했어: ' + e.message, 'error'); }
-    state.archiveLoaded = true; refreshReleases(); render();
   }
+
 })();
