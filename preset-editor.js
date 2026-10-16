@@ -1,6 +1,6 @@
 //@name preset_editor
 //@api 3.0
-//@version 0.9.4
+//@version 1.0.0
 //@display-name 프리셋 에디터
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/preset-editor.js
 
@@ -103,21 +103,16 @@ return module.exports; })();
       throw new Error('프리셋을 열지 못했어: ' + error.message);
     }
   }
-  const NONE = Symbol('missing');
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
   const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
-  const clone = v => v === NONE ? NONE : JSON.parse(JSON.stringify(v));
-  const canonical = v => v === NONE ? '[missing]' : JSON.stringify(v, function (k, x) {
+  const clone = v => JSON.parse(JSON.stringify(v));
+  const canonical = v => JSON.stringify(v, function (k, x) {
     if (!object(x)) return x;
     const out = Object.create(null);
     Object.keys(x).sort().forEach(key => { out[key] = x[key]; });
     return out;
   });
   const same = (a, b) => canonical(a) === canonical(b);
-  const field = (o, k) => object(o) && own(o, k) ? o[k] : NONE;
-  const pointer = (p, k) => p + '/' + String(k).replace(/~/g, '~0').replace(/\//g, '~1');
-  const PROMPTS = new Set(['mainPrompt', 'jailbreak', 'globalNote', 'promptTemplate',
-    'templateDefaultVariables', 'instructChatTemplate', 'JinjaTemplate', 'formatingOrder']);
   const SECRET_FIELDS = new Set(['openAIKey', 'proxyKey', 'openrouterKey', 'novellistAPI',
     'huggingfaceKey', 'mistralKey', 'nanogptKey', 'deepLKey', 'deeplKey', 'fishSpeechKey']);
 
@@ -154,420 +149,7 @@ return module.exports; })();
     });
     return out;
   }
-  function preview(v) { return v === NONE ? '(항목 없음 / 삭제)' : typeof v === 'string' ? v : JSON.stringify(v, null, 2); }
-
-  function context(choices = {}) {
-    const ctx = { conflicts: [], changes: [], warnings: [], choices };
-    ctx.conflict = (path, base, local, latest, reason) => {
-      const choice = own(choices, path) ? choices[path] : null;
-      const example = local === NONE ? latest : local;
-      const c = { id: path, path, reason, base: preview(base), local: preview(local), latest: preview(latest),
-        valueType: Array.isArray(example) ? 'array' : object(example) ? 'object' : typeof example,
-        localMissing: local === NONE, latestMissing: latest === NONE, resolved: false };
-      let value = latest;
-      if (choice && choice.mode === 'local') { value = local; c.resolved = true; }
-      if (choice && choice.mode === 'latest') { value = latest; c.resolved = true; }
-      if (choice && choice.mode === 'delete') { value = NONE; c.resolved = true; }
-      if (choice && choice.mode === 'custom') { value = clone(choice.value); c.resolved = true; }
-      ctx.conflicts.push(c);
-      return clone(value);
-    };
-    return ctx;
-  }
-
-  // LCS edit ranges, with a bounded matrix. Very large texts use a conservative single range.
-  function editRanges(base, side, cap = 1500000) {
-    const a = base, b = side;
-    let prefix = 0, suffix = 0;
-    while (prefix < a.length && prefix < b.length && a[prefix] === b[prefix]) prefix++;
-    while (suffix < a.length - prefix && suffix < b.length - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
-    const aa = a.slice(prefix, a.length - suffix), bb = b.slice(prefix, b.length - suffix);
-    if (!aa.length && !bb.length) return [];
-    if (!aa.length || !bb.length) return [{ start: prefix, end: a.length - suffix, value: bb }];
-    if (aa.length * bb.length > cap) return [{ start: prefix, end: a.length - suffix, value: bb }];
-    const width = bb.length + 1;
-    const dp = new Uint32Array((aa.length + 1) * width);
-    for (let i = aa.length - 1; i >= 0; i--) for (let j = bb.length - 1; j >= 0; j--) {
-      dp[i * width + j] = aa[i] === bb[j] ? 1 + dp[(i + 1) * width + j + 1] :
-        Math.max(dp[(i + 1) * width + j], dp[i * width + j + 1]);
-    }
-    const out = [];
-    let i = 0, j = 0, pending = null;
-    const flush = () => { if (pending) { out.push(pending); pending = null; } };
-    while (i < aa.length || j < bb.length) {
-      if (i < aa.length && j < bb.length && aa[i] === bb[j]) { flush(); i++; j++; }
-      else {
-        if (!pending) pending = { start: prefix + i, end: prefix + i, value: [] };
-        if (j < bb.length && (i === aa.length || dp[i * width + j + 1] > dp[(i + 1) * width + j])) pending.value.push(bb[j++]);
-        else { i++; pending.end = prefix + i; }
-      }
-    }
-    flush();
-    return out;
-  }
-  function combineRanges(base, local, latest) {
-    const left = editRanges(base, local), right = editRanges(base, latest);
-    const edits = left.slice();
-    for (const r of right) {
-      let duplicate = false;
-      for (const l of left) {
-        if (l.start === r.start && l.end === r.end && same(l.value, r.value)) { duplicate = true; continue; }
-        const overlap = l.start < r.end && r.start < l.end;
-        const inserts = l.start === l.end && r.start === r.end && l.start === r.start;
-        const inside = (l.start === l.end && l.start > r.start && l.start < r.end) ||
-          (r.start === r.end && r.start > l.start && r.start < l.end);
-        if (overlap || inserts || inside) return null;
-      }
-      if (!duplicate) edits.push(r);
-    }
-    edits.sort((x, y) => x.start - y.start || x.end - y.end);
-    const out = [];
-    let pos = 0;
-    for (const e of edits) { for (const x of base.slice(pos, e.start)) out.push(x); for (const x of e.value) out.push(x); pos = e.end; }
-    for (const x of base.slice(pos)) out.push(x);
-    return out.join('');
-  }
-  function mergeText(base, local, latest) {
-    const lines = s => s.match(/[^\n]*\n|[^\n]+$/g) || [];
-    const merged = combineRanges(lines(base), lines(local), lines(latest));
-    if (merged !== null) return merged;
-    // Resolve independent edits on the same line when character alignment is affordable.
-    if (Math.max(base.length, local.length, latest.length) <= 16000) {
-      return combineRanges(Array.from(base), Array.from(local), Array.from(latest));
-    }
-    return null;
-  }
-  function mergeValue(base, local, latest, path, ctx, text = true) {
-    if (same(local, base)) return clone(latest);
-    if (same(latest, base) || same(local, latest)) return clone(local);
-    if (base !== NONE && object(base) && object(local) && object(latest)) {
-      const out = {};
-      for (const k of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(latest)])) {
-        const v = mergeValue(field(base, k), field(local, k), field(latest, k), pointer(path, k), ctx, text);
-        if (v !== NONE) out[k] = v;
-      }
-      return out;
-    }
-    if (text && typeof base === 'string' && typeof local === 'string' && typeof latest === 'string') {
-      const v = mergeText(base, local, latest);
-      if (v !== null) return v;
-    }
-    return ctx.conflict(path, base, local, latest, '같은 부분을 커스텀 수정본과 새 원본에서 함께 변경했어.');
-  }
-
-  function matchBlocks(base, side) {
-    const matched = new Map(), used = new Set();
-    const pairUnique = keyFn => {
-      const a = new Map(), b = new Map();
-      base.forEach((x, i) => { if (!matched.has(i)) { const k = keyFn(x); if (k != null) a.set(k, [...(a.get(k) || []), i]); } });
-      side.forEach((x, i) => { if (!used.has(i)) { const k = keyFn(x); if (k != null) b.set(k, [...(b.get(k) || []), i]); } });
-      for (const [k, ids] of a) if (ids.length === 1 && b.get(k)?.length === 1) {
-        matched.set(ids[0], b.get(k)[0]); used.add(b.get(k)[0]);
-      }
-    };
-    pairUnique(x => x.id ? 'id:' + x.id : null);
-    pairUnique(x => x.name ? 'name:' + x.name : null);
-    pairUnique(canonical);
-    const shape = x => [x.type, x.type2 || ''].join('|');
-    // Only the sole remaining block of a structural type can be mapped without guessing.
-    pairUnique(x => x.id || x.name ? null : shape(x));
-    const ambiguous = base.some((x, i) => !matched.has(i) && !x.id && !x.name &&
-      side.some((y, j) => !used.has(j) && !y.id && !y.name && shape(x) === shape(y)));
-    return { matched, used, ambiguous };
-  }
-  function weave(primary, secondary) {
-    const out = primary.slice();
-    secondary.forEach((id, i) => {
-      if (out.includes(id)) return;
-      const next = secondary.slice(i + 1).find(x => out.includes(x));
-      const previous = secondary.slice(0, i).reverse().find(x => out.includes(x));
-      if (next != null && (previous == null || out.indexOf(previous) < out.indexOf(next))) out.splice(out.indexOf(next), 0, id);
-      else if (previous != null) out.splice(out.indexOf(previous) + 1, 0, id);
-      else out.push(id);
-    });
-    return out;
-  }
-  function mergeBlocks(base, local, latest, path, ctx) {
-    if (same(local, base)) return clone(latest);
-    if (same(latest, base) || same(local, latest)) return clone(local);
-    if (![base, local, latest].every(Array.isArray)) return mergeValue(base, local, latest, path, ctx);
-    const lm = matchBlocks(base, local), nm = matchBlocks(base, latest);
-    if (lm.ambiguous || nm.ambiguous) return ctx.conflict(path, base, local, latest,
-      '이름 없는 비슷한 블록이 여러 개라 대응 관계를 확정할 수 없어. 배열 전체를 선택하거나 직접 편집해 줘.');
-    const values = new Map(), li = new Map(), ni = new Map();
-    base.forEach((b, i) => {
-      const l = lm.matched.has(i) ? local[lm.matched.get(i)] : NONE;
-      const n = nm.matched.has(i) ? latest[nm.matched.get(i)] : NONE;
-      const v = mergeValue(b, l, n, pointer(path, 'block-' + i), ctx);
-      if (v !== NONE) values.set('b' + i, v);
-      if (l !== NONE) li.set(lm.matched.get(i), 'b' + i);
-      if (n !== NONE) ni.set(nm.matched.get(i), 'b' + i);
-    });
-    latest.forEach((n, j) => { if (!nm.used.has(j)) { values.set('n' + j, clone(n)); ni.set(j, 'n' + j); } });
-    local.forEach((l, i) => {
-      if (lm.used.has(i)) return;
-      const candidates = latest.map((n, j) => ({ n, j })).filter(({ n, j }) => !nm.used.has(j) &&
-        (same(l, n) || (l.id && l.id === n.id) || (l.name && l.name === n.name)));
-      if (candidates.length === 1 && ![...li.values()].includes('n' + candidates[0].j)) {
-        const { n, j } = candidates[0];
-        values.set('n' + j, mergeValue(NONE, l, n, pointer(path, 'added-' + j), ctx)); li.set(i, 'n' + j);
-      } else { values.set('l' + i, clone(l)); li.set(i, 'l' + i); }
-    });
-    const seq = (arr, map) => arr.map((_, i) => map.get(i)).filter(x => values.has(x) && values.get(x) !== NONE);
-    const ls = seq(local, li), ns = seq(latest, ni);
-    // Include a block kept through a deletion conflict, even when its side had no entry.
-    const keptBase = base.map((_, i) => 'b' + i).filter(x => values.has(x) && values.get(x) !== NONE);
-    const shared = keptBase.filter(x => ls.includes(x) && ns.includes(x));
-    const bOrder = shared, lOrder = ls.filter(x => shared.includes(x)), nOrder = ns.filter(x => shared.includes(x));
-    const localMoved = !same(bOrder, lOrder), latestMoved = !same(bOrder, nOrder);
-    const orderLocal = weave(weave(ls, ns), keptBase), orderLatest = weave(weave(ns, ls), keptBase);
-    let order = localMoved ? orderLocal : orderLatest;
-    if (localMoved && latestMoved && !same(lOrder, nOrder)) {
-      const arrays = order => order.map(id => values.get(id));
-      return ctx.conflict(pointer(path, '@order'), arrays(keptBase), arrays(orderLocal), arrays(orderLatest),
-        '블록 순서를 양쪽에서 다르게 바꿨어. 병합된 내용에 적용할 순서를 선택해 줘.');
-    }
-    return order.map(id => clone(values.get(id)));
-  }
-
-  let uid = 0;
-  function parseToggles(text) {
-    const groups = [];
-    let current = null;
-    const make = (name, explicit) => { const g = { uid: 'g' + (++uid), name, explicit, items: [] }; groups.push(g); return g; };
-    String(text || '').split(/\r?\n/).forEach(raw => {
-      const t = raw.trim(), start = t.match(/^=([^=]+)=group$/i);
-      if (start) { current = make(start[1], true); return; }
-      if (/^==groupEnd$/i.test(t)) {
-        if (!current?.explicit) { current ||= make('', false); current.items.push({ type: 'raw', raw }); }
-        current = null; return;
-      }
-      if (!current) current = make('', false);
-      let item = { type: t === '==divider' ? 'divider' : 'raw', raw };
-      if (t && !t.startsWith('#') && !t.startsWith('//')) {
-        const m = t.match(/^([^=\s][^=]*)=(.*)$/);
-        if (m) {
-          const rest = m[2], parts = rest.split('=select=');
-          item = { type: 'item', key: m[1].trim(), raw,
-            label: parts.length > 1 ? parts[0] : rest.replace(/=text$/, '').split('=')[0],
-            control: parts.length > 1 ? 'select' : rest.endsWith('=text') ? 'text' : 'toggle',
-            options: parts.length > 1 ? parts.slice(1).join('=select=').split(',').map(x => x.trim()) : [] };
-        }
-      }
-      current.items.push(item);
-    });
-    return groups.filter(g => g.explicit || g.items.some(it => it.raw !== ''));
-  }
-  function serializeToggles(groups) {
-    return groups.flatMap(g => [...(g.explicit ? ['=' + g.name + '=group'] : []),
-      ...g.items.map(it => it.type === 'divider' ? '==divider' : it.raw), ...(g.explicit ? ['==groupEnd'] : [])]).join('\n');
-  }
-  function readAliases(text) {
-    const aliases = new Map(), targets = new Set();
-    String(text || '').split(/\r?\n/).forEach(line => {
-      if (!line.trim()) return;
-      const m = line.trim().match(/^([^=]+)=([^=]+)$/);
-      if (!m) throw new Error('키 대응표는 옛키=새키 형식으로 한 줄에 하나씩 작성해 줘.');
-      const a = m[1].trim(), b = m[2].trim();
-      if (!a || !b || aliases.has(a) || targets.has(b)) throw new Error('키 대응표에 빈 키나 중복 대응이 있어.');
-      aliases.set(a, b); targets.add(b);
-    });
-    return aliases;
-  }
-  function remapGroups(groups, aliases) {
-    return groups.map(g => ({ ...g, items: g.items.map(it => {
-      if (it.type !== 'item' || !aliases.has(it.key)) return { ...it };
-      const key = aliases.get(it.key);
-      return { ...it, key, raw: key + it.raw.slice(it.raw.indexOf('=')) };
-    }) }));
-  }
-  function definitions(groups, path, ctx) {
-    const map = new Map();
-    groups.forEach(g => g.items.forEach(it => {
-      if (it.type !== 'item') return;
-      if (map.has(it.key) && map.get(it.key).trim() !== it.raw.trim()) {
-        const old = map.get(it.key);
-        const v = ctx.conflict(pointer(path, it.key), NONE, old, it.raw,
-          '같은 키가 서로 다른 정의로 중복되어 있어. 사용할 정의를 선택해 줘.');
-        if (v !== NONE) map.set(it.key, v); else map.delete(it.key);
-      } else map.set(it.key, it.raw);
-    }));
-    return map;
-  }
-  function migrateToggles(baseText, localText, latestText, options = {}, choices = {}) {
-    const ctx = context(choices), aliases = readAliases(options.aliases);
-    const bg = remapGroups(parseToggles(baseText || ''), aliases);
-    const lg = remapGroups(parseToggles(localText || ''), aliases);
-    const ng = parseToggles(latestText || '');
-    const bm = definitions(bg, '/toggles/base-duplicates', ctx);
-    const lm = definitions(lg, '/toggles/local-duplicates', ctx);
-    const nm = definitions(ng, '/toggles/latest-duplicates', ctx);
-    const merged = new Map();
-    const hasBase = baseText !== null && baseText !== undefined;
-    for (const key of new Set([...bm.keys(), ...lm.keys(), ...nm.keys()])) {
-      const b = bm.has(key) ? bm.get(key) : NONE, l = lm.has(key) ? lm.get(key) : NONE, n = nm.has(key) ? nm.get(key) : NONE;
-      let value;
-      if (!hasBase) value = n !== NONE ? clone(n) : clone(l);
-      else if (b !== NONE && n === NONE && l !== NONE) value = ctx.conflict(pointer('/toggles/definitions', key), b, l, NONE,
-        '새 원본에 없는 토글이야. 기존 정의를 보존할지 제거할지 선택해 줘. 프롬프트에서도 이 키를 쓰는지 확인해 줘.');
-      else value = mergeValue(b, l, n, pointer('/toggles/definitions', key), ctx, false);
-      if (value !== NONE) {
-        if (typeof value !== 'string' || parseToggles(value).flatMap(g => g.items).filter(it => it.type === 'item').length !== 1 ||
-            parseToggles(value).flatMap(g => g.items).find(it => it.type === 'item').key !== key) throw new Error('토글 정의는 해당 키의 한 줄이어야 해: ' + key);
-        merged.set(key, value);
-      }
-      const status = n === NONE ? (b === NONE && hasBase ? '커스텀 추가' : '미포함') : l === NONE ? '신규' : l.trim() !== n.trim() ? '변경' : '동일';
-      ctx.changes.push({ key, status, local: preview(l), latest: preview(n),
-        oldOptions: parseToggles(l === NONE ? '' : l).flatMap(g => g.items).find(it => it.type === 'item')?.options || [],
-        newOptions: parseToggles(n === NONE ? '' : n).flatMap(g => g.items).find(it => it.type === 'item')?.options || [] });
-    }
-    if (!hasBase) ctx.warnings.push('옛 원본 없이 편집: 같은 키의 정의는 새 버전을 우선하고, 기존 즐겨찾기·배치를 유지해. 커스텀 라벨/선택지 변경 여부는 구분할 수 없어.');
-    // Layout is user-owned. If unchanged from the baseline, use the upstream layout.
-    const layout = gs => gs.map(g => ({ name: g.name, explicit: g.explicit,
-      items: g.items.map(it => it.type === 'item' ? { key: it.key } : { raw: it.raw, type: it.type }) }));
-    const withDefinition = it => ({ ...it, ...parseToggles(merged.get(it.key)).flatMap(g => g.items).find(x => x.type === 'item') });
-    const favIndex = Number.isInteger(options.favoriteIndex) ? options.favoriteIndex : -1;
-    const oldFav = lg[favIndex];
-    let output = clone(hasBase && same(layout(bg), layout(lg)) ? ng : lg.length ? lg : ng);
-    output = output.map(g => ({ ...g, uid: 'g' + (++uid), items: g.items.flatMap(it =>
-      it.type !== 'item' ? [it] : merged.has(it.key) ? [withDefinition(it)] : []) }));
-    // Do not drop a latest group with a colliding favorite name; append its unseen items instead.
-    const visible = new Set(output.flatMap(g => g.items.filter(it => it.type === 'item').map(it => it.key)));
-    ng.forEach(g => {
-      const unseen = g.items.filter(it => it.type === 'item' && merged.has(it.key) && !visible.has(it.key));
-      let target = output.find(x => x.name === g.name && x.explicit === g.explicit);
-      const baselineGroup = bg.find(x => x.name === g.name && x.explicit === g.explicit);
-      const additions = g.items.filter(it => it.type !== 'item' && it.raw.trim() &&
-        !baselineGroup?.items.some(old => old.type === it.type && old.raw === it.raw) &&
-        !target?.items.some(old => old.type === it.type && old.raw === it.raw));
-      if (!unseen.length && !additions.length) return;
-      if (!target) {
-        target = { uid: 'g' + (++uid), name: g.name, explicit: g.explicit,
-          items: g.items.flatMap(it => it.type !== 'item' ? [clone(it)] : unseen.includes(it) ? [withDefinition(it)] : []) };
-        output.push(target);
-        unseen.forEach(it => visible.add(it.key));
-      } else {
-        target.items.push(...additions.map(clone));
-        unseen.forEach(it => { target.items.push(withDefinition(it)); visible.add(it.key); });
-      }
-    });
-    // Retain locally added blocks even if the baseline layout happens to compare equal.
-    lg.forEach(g => g.items.forEach(it => {
-      if (it.type !== 'item' || !merged.has(it.key) || visible.has(it.key)) return;
-      let target = output.find(x => x.name === g.name && x.explicit === g.explicit);
-      if (!target) { target = { uid: 'g' + (++uid), name: g.name, explicit: g.explicit, items: [] }; output.push(target); }
-      target.items.push(withDefinition(it)); visible.add(it.key);
-    }));
-    if (oldFav) {
-      const favKeys = new Set(oldFav.items.filter(it => it.type === 'item' && merged.has(it.key)).map(it => it.key));
-      const occurrence = lg.slice(0, favIndex).filter(g => g.name === oldFav.name && g.explicit === oldFav.explicit).length;
-      const targets = output.filter(g => g.name === oldFav.name && g.explicit === oldFav.explicit);
-      let target = targets[occurrence];
-      if (!target) { target = { ...oldFav, uid: 'g' + (++uid), items: [] }; output.unshift(target); }
-      const extras = target.items.filter(it => it.type === 'item' ? !favKeys.has(it.key) :
-        !oldFav.items.some(old => old.type === it.type && old.raw === it.raw));
-      target.items = oldFav.items.flatMap(it => it.type !== 'item' ? [clone(it)] : merged.has(it.key) ? [withDefinition(it)] : []).concat(extras);
-      if (!options.keepInOriginal) output.forEach(g => { if (g !== target) g.items = g.items.filter(it => it.type !== 'item' || !favKeys.has(it.key)); });
-      else ng.forEach(g => {
-        const copies = g.items.filter(it => it.type === 'item' && favKeys.has(it.key));
-        if (!copies.length) return;
-        let original = output.find(x => x !== target && x.name === g.name && x.explicit === g.explicit);
-        if (!original && g.name === target.name) return;
-        if (!original) { original = { ...g, uid: 'g' + (++uid), items: [] }; output.push(original); }
-        copies.forEach(it => { if (!original.items.some(x => x.key === it.key)) original.items.push(withDefinition(it)); });
-      });
-    }
-    return { text: serializeToggles(output), groups: output, ...ctx };
-  }
-  function mergePresets(base, local, latest, options = {}, choices = {}) {
-    const ctx = context(choices), result = clone(latest);
-    const keys = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(latest)]);
-    keys.delete('customPromptTemplateToggle'); keys.delete('name');
-    for (const key of keys) {
-      if (!PROMPTS.has(key) && !options.preserveSettings) continue;
-      if (SECRET_FIELDS.has(key) || /(?:api.?key|access.?token|refresh.?token|secret|password)$/i.test(key)) continue;
-      const b = field(base, key), l = field(local, key), n = field(latest, key);
-      const value = key === 'promptTemplate' ? mergeBlocks(b, l, n, pointer('', key), ctx) : mergeValue(b, l, n, pointer('', key), ctx);
-      if (value === NONE) delete result[key]; else result[key] = value;
-      if (!same(value, n)) ctx.changes.push({ key, status: '커스텀 수정 보존' });
-    }
-    const toggles = migrateToggles(base.customPromptTemplateToggle ?? '', local.customPromptTemplateToggle ?? '',
-      latest.customPromptTemplateToggle ?? '', options, choices);
-    if (keys.has('templateDefaultVariables')) ctx.warnings.push('기본 변수 정의는 병합하지만 현재 채팅에서 켜둔 토글 값·선택값은 옮기지 않아.');
-    if ([base, local, latest].some(v => own(v, 'customPromptTemplateToggle'))) result.customPromptTemplateToggle = toggles.text;
-    ctx.conflicts.push(...toggles.conflicts); ctx.warnings.push(...toggles.warnings);
-    result.name = options.name || (latest.name || '프리셋') + ' · 커스텀 편집';
-    return { preset: sanitizePreset(result), toggles, ...ctx };
-  }
-  function initialValue(local, latest, path, ctx) {
-    if (same(local, latest) || local === NONE) return clone(latest);
-    if (object(local) && object(latest)) {
-      const result = clone(latest);
-      for (const key of Object.keys(local)) {
-        const value = initialValue(field(local, key), field(latest, key), pointer(path, key), ctx);
-        if (value === NONE) delete result[key]; else result[key] = value;
-      }
-      return result;
-    }
-    return ctx.conflict(path, NONE, local, latest,
-      latest === NONE ? '보관한 원본이 없어 커스텀 추가인지 원본에서 삭제된 항목인지 구분할 수 없어. 가져올 항목만 선택해 줘.' :
-        '첫 편집이야. 커스텀 구문과 제작자의 변경을 자동으로 구분할 수 없으니 사용할 버전을 고르거나 직접 병합해 줘.');
-  }
-  function initialBlocks(local, latest, path, ctx) {
-    if (same(local, latest) || local === NONE) return clone(latest);
-    if (![local, latest].every(Array.isArray)) return initialValue(local, latest, path, ctx);
-    const mapping = matchBlocks(latest, local);
-    if (mapping.ambiguous) return ctx.conflict(path, NONE, local, latest,
-      '첫 편집이고 비슷한 이름 없는 블록이 여러 개라 대응을 확정할 수 없어. 배열을 직접 편집하거나 사용할 버전을 선택해 줘.');
-    const values = new Map(), localIds = new Map();
-    latest.forEach((block, index) => {
-      const id = 'n' + index;
-      const value = mapping.matched.has(index) ? initialValue(local[mapping.matched.get(index)], block, pointer(path, 'block-' + index), ctx) : clone(block);
-      if (value !== NONE) values.set(id, value);
-      if (mapping.matched.has(index)) localIds.set(mapping.matched.get(index), id);
-    });
-    local.forEach((block, index) => {
-      if (mapping.used.has(index)) return;
-      const id = 'l' + index, value = initialValue(block, NONE, pointer(path, 'personal-' + index), ctx);
-      if (value !== NONE) values.set(id, value);
-      localIds.set(index, id);
-    });
-    const latestOrder = latest.map((_, index) => 'n' + index).filter(id => values.has(id));
-    const localOrder = local.map((_, index) => localIds.get(index)).filter(id => values.has(id));
-    const sharedLocal = localOrder.filter(id => id.startsWith('n'));
-    if (!same(sharedLocal, latestOrder.filter(id => sharedLocal.includes(id)))) ctx.warnings.push('첫 편집에서는 공통 프롬프트 블록의 순서를 새 원본 기준으로 유지해.');
-    return weave(latestOrder, localOrder).map(id => clone(values.get(id)));
-  }
-  function mergeInitialPresets(local, latest, options = {}, choices = {}) {
-    const ctx = context(choices), result = clone(latest);
-    for (const key of new Set([...Object.keys(local), ...Object.keys(latest)])) {
-      if (key === 'name' || key === 'customPromptTemplateToggle' || (!PROMPTS.has(key) && !options.preserveSettings)) continue;
-      if (SECRET_FIELDS.has(key) || /(?:api.?key|access.?token|refresh.?token|secret|password)$/i.test(key)) continue;
-      const value = key === 'promptTemplate' ? initialBlocks(field(local, key), field(latest, key), pointer('', key), ctx) : initialValue(field(local, key), field(latest, key), pointer('', key), ctx);
-      if (value === NONE) delete result[key]; else result[key] = value;
-      if (!same(value, field(latest, key))) ctx.changes.push({key, status:'첫 편집 · 직접 선택'});
-    }
-    const toggles = migrateToggles(null, local.customPromptTemplateToggle || '', latest.customPromptTemplateToggle || '', options, choices);
-    if ([local, latest].some(v => own(v, 'customPromptTemplateToggle'))) result.customPromptTemplateToggle = toggles.text;
-    ctx.conflicts.push(...toggles.conflicts); ctx.warnings.push(...toggles.warnings);
-    ctx.warnings.unshift('보관한 원본이 없는 첫 편집이야. 다른 구문·커스텀 블록을 직접 선택해 줘. 완성본을 저장하면 새 원본을 다음 비교 기준으로 자동 보관해.');
-    result.name = options.name || (latest.name || '프리셋') + ' · 커스텀 편집';
-    return {preset:sanitizePreset(result), toggles, ...ctx, firstMigration:true};
-  }
-  function validateReleases(data) {
-    if (!object(data) || data.type !== 'risu-preset-release-archive' || data.version !== 1 || !Array.isArray(data.entries) || data.entries.length > 32) throw new Error('보관한 원본 데이터 형식이 올바르지 않아.');
-    const ids = new Set();
-    for (const entry of data.entries) {
-      if (!object(entry) || typeof entry.id !== 'string' || !entry.id || ids.has(entry.id) || typeof entry.label !== 'string' || typeof entry.savedAt !== 'string') throw new Error('보관한 원본 항목이 올바르지 않아.');
-      ids.add(entry.id);
-      for (const key of ['preset', 'personalPreset', 'pendingPreset']) if (entry[key] != null) parsePreset(JSON.stringify(entry[key]));
-      if (!entry.preset && !entry.personalPreset && !entry.pendingPreset && typeof entry.toggleBaseline !== 'string') throw new Error('보관한 프리셋 내용이 없어.');
-      for (const key of ['toggleBaseline', 'personalToggles']) if (own(entry, key) && typeof entry[key] !== 'string') throw new Error('보관한 토글 내용이 올바르지 않아.');
-    }
-    return data;
-  }
-  const Core = { parseJSON, parsePreset, importPresetFile, exportPresetFile, sanitizePreset, mergeText, mergePresets, mergeBlocks, mergeInitialPresets, validateReleases,
-    parseToggles, serializeToggles, migrateToggles, readAliases, same, context };
+  const Core = { parseJSON, parsePreset, importPresetFile, exportPresetFile, sanitizePreset, same };
   if (typeof module !== 'undefined' && module.exports) { module.exports = Core; return; }
   globalThis.PresetEditor = Core;
   if (typeof document === 'undefined') return;
@@ -577,13 +159,13 @@ return module.exports; })();
 
   function installEditorDesign() {
     const LIGHT = '--bg:#f4f2ec;--bg2:#ece9e0;--surface:#fffdf8;--surface2:#f3f0e8;--surface3:#e7e3d7;--line:#ddd8ca;--line2:#c2bba8;--text:#24221d;--muted:#5f5b50;--faint:#8a8576;' +
-      '--accent:#a85a06;--accent-ink:#fff;--accent-soft:#a85a0618;--info:#2858b8;--info-soft:#2858b816;--ok:#18704b;--ok-soft:#18704b16;--danger:#b42b2b;--danger-soft:#b42b2b14;--shadow:0 12px 32px rgba(60,48,20,.18);--base:#8a8576';
+      '--accent:#a85a06;--accent-ink:#fff;--accent-soft:#a85a0618;--info:#2858b8;--info-soft:#2858b816;--ok:#18704b;--danger:#b42b2b;--shadow:0 12px 32px rgba(60,48,20,.18)';
     if (document.getElementById('preset-editor-design')) return;
     const style = document.createElement('style');
     style.id = 'preset-editor-design';
     style.textContent = `
       :root{color-scheme:dark;--bg:#111318;--bg2:#161920;--surface:#1b1e27;--surface2:#232734;--surface3:#2c3142;--line:#2c3140;--line2:#3f465c;--text:#eceae4;--muted:#a3a9bb;--faint:#8b91a6;
-        --accent:#efb866;--accent-ink:#241802;--accent-soft:#efb86624;--info:#8cb5ff;--info-soft:#8cb5ff22;--ok:#72d6a9;--ok-soft:#72d6a922;--danger:#ff8e8e;--danger-soft:#ff8e8e22;--base:#8b91a6;
+        --accent:#efb866;--accent-ink:#241802;--accent-soft:#efb86624;--info:#8cb5ff;--info-soft:#8cb5ff22;--ok:#72d6a9;--danger:#ff8e8e;
         --shadow:0 14px 36px rgba(0,0,0,.45);--prompt-font:14px;
         --ui:'Pretendard Variable',Pretendard,system-ui,-apple-system,'Segoe UI','Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',sans-serif;
         --mono:ui-monospace,'Cascadia Code','D2Coding',Consolas,'Noto Sans Mono CJK KR',monospace}
@@ -598,108 +180,46 @@ return module.exports; })();
       .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:6px 14px;border:1px solid var(--line2);border-radius:9px;background:var(--surface2);font-weight:550;white-space:nowrap;transition:background .15s,border-color .15s,filter .15s}
       .btn:hover:not(:disabled){background:var(--surface3);border-color:var(--faint)}.btn:disabled{opacity:.45;cursor:not-allowed}
       .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}.btn.primary:hover:not(:disabled){background:var(--accent);filter:brightness(1.08)}
-      .btn.ok{background:var(--ok-soft);border-color:var(--ok);color:var(--ok);font-weight:700}
       .btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}.btn.ghost:hover:not(:disabled){background:var(--surface2);color:var(--text);border-color:transparent}
       .btn.danger{color:var(--danger)}.btn.danger-solid{background:var(--danger);border-color:var(--danger);color:#1a0505;font-weight:700}
-      .btn.sm{min-height:30px;padding:3px 10px;font-size:12.5px;border-radius:7px}.btn.lg{min-height:44px;padding:10px 24px;font-size:15px;border-radius:11px}
-      .btn.icon{padding:0;width:34px;min-width:34px}.btn.sm.icon{width:30px;min-width:30px}.btn.on{color:var(--accent)}
-      .count{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:800}.count.ok{background:var(--ok-soft);color:var(--ok)}
+      .btn.sm{min-height:30px;padding:3px 10px;font-size:12.5px;border-radius:7px}
+      .btn.icon{padding:0;width:34px;min-width:34px}.btn.sm.icon{width:30px;min-width:30px}
+      .count{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:var(--accent);color:var(--accent-ink);font-size:11px;font-weight:800}
       .field{display:grid;gap:5px;min-width:0}.field>span{font-size:12.5px;color:var(--muted);font-weight:600}
       input[type=text],input[type=search],select,textarea{width:100%;min-height:36px;padding:7px 10px;border:1px solid var(--line2);border-radius:9px;background:var(--bg2);color:var(--text)}
       textarea{font:12.5px/1.65 var(--mono);resize:vertical;min-height:110px}::placeholder{color:var(--faint)}
-      input[type=checkbox]{width:17px;height:17px;accent-color:var(--accent);flex:none;margin:0}select{max-width:100%}
-      .check{display:flex;align-items:flex-start;gap:9px;cursor:pointer}.checks{display:grid;gap:8px;align-content:center}
+      select{max-width:100%}
       .chrome{position:sticky;top:0;z-index:30;background:var(--bg);border-bottom:1px solid var(--line)}
       @supports (background:color-mix(in srgb,red,blue)){.chrome{background:color-mix(in srgb,var(--bg) 90%,transparent);backdrop-filter:blur(12px)}}
       .topbar,.stepbar,main{max-width:1280px;margin:0 auto}.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 20px}
-      .brand{display:flex;align-items:center;gap:12px;min-width:0}.brand p{color:var(--muted);font-size:12.5px}
+      .brand{display:flex;align-items:center;gap:12px;min-width:0}
       .mark{display:grid;place-items:center;flex:none;width:36px;height:36px;border-radius:10px;background:var(--accent);color:var(--accent-ink);font-size:18px;font-weight:800}
       .top-actions{display:flex;gap:8px;align-items:center}
       .stepbar{display:flex;align-items:center;gap:18px;padding:0 20px;overflow-x:auto}
-      .seg{display:inline-flex;flex:none;padding:3px;margin:8px 0;background:var(--bg2);border:1px solid var(--line);border-radius:10px}
-      .seg button{border:0;background:transparent;padding:4px 12px;min-height:30px;border-radius:7px;color:var(--muted);font-weight:600}
-      .seg button[aria-pressed=true]{background:var(--surface3);color:var(--text);box-shadow:inset 0 0 0 1px var(--line2)}
-      .steps{display:flex;gap:2px;flex:1;min-width:max-content}
       .step{display:flex;align-items:center;gap:8px;padding:12px;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font-weight:600;white-space:nowrap}
-      .step .n{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1px solid var(--line2);font-size:11px}
-      .step[data-done=true] .n{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}
-      .step[aria-selected=true]{color:var(--text);border-bottom-color:var(--accent)}.step[aria-selected=true] .n{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+      .step[aria-selected=true]{color:var(--text);border-bottom-color:var(--accent)}
       .step:hover:not(:disabled){color:var(--text)}.step:disabled{opacity:.38;cursor:not-allowed}
-      main{padding:22px 20px 90px;display:grid;gap:16px}.step-panel,.stack{display:grid;gap:16px;min-width:0}
+      main{padding:22px 20px 90px;display:grid;gap:16px}.stack{display:grid;gap:16px;min-width:0}
       .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px;min-width:0}
       .card-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:16px}
-      .lead{color:var(--muted);margin-top:4px;max-width:72ch}.hint{color:var(--muted);font-size:12.5px}.note{color:var(--muted);font-size:12.5px;padding:8px 12px;border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:0 8px 8px 0}
+      .lead{color:var(--muted);margin-top:4px;max-width:72ch}.hint{color:var(--muted);font-size:12.5px}
       .badge{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;background:var(--surface3);color:var(--muted);font-size:11.5px;font-weight:650;white-space:nowrap}
-      .badge.new{background:var(--ok-soft);color:var(--ok)}.badge.changed{background:var(--info-soft);color:var(--info)}.badge.missing{background:var(--danger-soft);color:var(--danger)}.badge.custom{background:var(--accent-soft);color:var(--accent)}
+      .badge.changed{background:var(--info-soft);color:var(--info)}.badge.custom{background:var(--accent-soft);color:var(--accent)}
       .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.spread{justify-content:space-between}.grow{flex:1;min-width:0}.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:end}
-      .archive-bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding:14px;background:var(--bg2);border:1px solid var(--line);border-radius:12px}.archive-bar .field{flex:1;min-width:220px}
-      .actionbar{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.actionbar .hint{margin-right:auto}
-      .slots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:16px}
-      .slot{display:grid;gap:10px;align-content:start;min-width:0;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--bg2);transition:border-color .15s,background .15s}
-      .slot.dragover{border-color:var(--accent);background:var(--accent-soft)}.slot-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
-      .tag{display:inline-flex;align-items:center;gap:8px}.tag::before{content:'';width:10px;height:10px;border-radius:3px;background:var(--base)}.tag.mine::before{background:var(--accent)}.tag.theirs::before{background:var(--info)}
+      .actionbar{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}
       .drop{display:grid;gap:2px;justify-items:center;width:100%;padding:24px 12px;border:1.5px dashed var(--line2);border-radius:10px;background:transparent;color:var(--muted);text-align:center;transition:border-color .15s,background .15s}
-      .drop b{color:var(--text);font-size:14px}.drop small{font-size:12px}.drop:hover{border-color:var(--accent);background:var(--accent-soft)}
-      .slot.filled .drop{padding:11px;border-style:solid;border-color:var(--line2)}.slot.filled .drop small{display:none}
-      .file-status{color:var(--muted);font-size:12px;overflow-wrap:anywhere;min-height:0}.file-status:empty{display:none}
-      .overview{font-weight:600;overflow-wrap:anywhere}.overview:empty{display:none}
-      .baseline{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--base);border-radius:10px;background:var(--bg2)}
-      .baseline strong{display:block;overflow-wrap:anywhere}.eyebrow{display:block;color:var(--muted);font-size:11.5px;font-weight:650;letter-spacing:.02em}
-      .advanced{margin-top:16px;border-top:1px solid var(--line)}.advanced>summary{display:flex;align-items:center;gap:8px;padding:12px 0 4px;color:var(--muted);font-weight:650;cursor:pointer;list-style:none}
-      .advanced>summary::-webkit-details-marker{display:none}.advanced>summary::before{content:'▸';font-size:11px;transition:transform .15s}.advanced[open]>summary::before{transform:rotate(90deg)}
-      .adv-body{display:grid;gap:14px;padding-top:12px}
-      .menu{position:relative}.menu>summary{list-style:none;cursor:pointer}.menu>summary::-webkit-details-marker{display:none}
-      .menu-list{position:absolute;right:0;top:calc(100% + 6px);z-index:60;min-width:210px;display:grid;gap:2px;padding:6px;border:1px solid var(--line2);border-radius:12px;background:var(--surface);box-shadow:var(--shadow)}
-      .menu-item{display:block;width:100%;min-height:34px;padding:7px 10px;border:0;border-radius:8px;background:transparent;text-align:left}.menu-item:hover:not(:disabled){background:var(--surface2)}.menu-item.danger{color:var(--danger)}.menu-item:disabled{opacity:.4}
-      .conflict-grid{display:grid;grid-template-columns:250px minmax(0,1fr);gap:14px;align-items:start}.cindex{display:grid;gap:6px;max-height:calc(100dvh - 270px);overflow:auto}
-      .cidx{display:grid;gap:1px;width:100%;padding:9px 11px;text-align:left;border:1px solid var(--line);border-radius:9px;background:var(--bg2);overflow-wrap:anywhere}.cidx small{color:var(--muted)}.cidx.resolved small{color:var(--ok)}.cidx[aria-current=true]{border-color:var(--accent);background:var(--accent-soft)}
-      .conflict{display:grid;gap:14px;padding:18px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)}.conflict code{font:12px var(--mono);color:var(--muted);overflow-wrap:anywhere}
-      .versions{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(0,1fr))}.versions.has-base{grid-template-columns:repeat(3,minmax(0,1fr))}
-      .ver{min-width:0;border:1px solid var(--line);border-top:3px solid var(--base);border-radius:10px;background:var(--surface)}.ver.mine{border-top-color:var(--accent)}.ver.theirs{border-top-color:var(--info)}
-      .ver b{display:block;padding:8px 12px;font-size:12.5px;border-bottom:1px solid var(--line)}.ver pre{margin:0;padding:12px;max-height:340px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.7 var(--mono)}
-      .choices{display:flex;gap:8px;flex-wrap:wrap}.choices .btn[aria-pressed=true]{background:var(--ok-soft);border-color:var(--ok);color:var(--ok)}.conflict details textarea{min-height:240px;font-size:13px;margin:10px 0}
+      .drop small{font-size:12px}.drop:hover{border-color:var(--accent);background:var(--accent-soft)}
       .viewer-tools{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:12.5px}.viewer-tools label{display:flex;gap:6px;align-items:center}.viewer-tools select{width:auto;min-height:30px;padding:3px 8px}
-      .status-line{color:var(--ok);font-size:12.5px;margin-bottom:10px}.status-line:empty{display:none}
-      .prompt-grid{display:grid;grid-template-columns:230px minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
-      .prompt-sidebar,.prompt-pane{min-width:0;border:1px solid var(--line);border-radius:12px;background:var(--bg2)}.prompt-sidebar{padding:12px;position:sticky;top:120px}
-      .prompt-nav{display:grid;gap:3px;max-height:calc(100dvh - 290px);overflow:auto;margin-top:10px}
-      .pnav{display:block;width:100%;padding:8px 10px;text-align:left;border:1px solid transparent;border-radius:8px;background:transparent;overflow-wrap:anywhere}.pnav:hover{background:var(--surface2)}.pnav[aria-current=true]{background:var(--accent-soft);border-color:var(--accent)}.pnav small{display:block;color:var(--muted);font-size:11.5px}
-      .prompt-pane-head{display:grid;gap:4px;padding:12px 14px;border-bottom:1px solid var(--line)}.prompt-pane-head .row{justify-content:space-between}.prompt-pane-head select{width:auto;min-height:30px;padding:3px 8px}
-      .prompt-pane-body{padding:14px;max-height:calc(100dvh - 250px);overflow:auto}.prompt-meta{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
-      .prompt-field{display:grid;gap:5px;margin-bottom:14px}.prompt-field>span{font-size:12.5px;color:var(--muted);font-weight:600}
-      .prompt-field textarea,.prompt-reference{font:var(--prompt-font)/1.8 var(--mono);min-height:300px;tab-size:2}.prompt-field textarea[readonly]{opacity:.8}
-      .prompt-reference{margin:0 0 14px;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--bg);white-space:pre-wrap;overflow-wrap:anywhere;overflow:auto;max-height:560px}
-      .empty{padding:22px 14px;text-align:center;color:var(--muted)}.warn-text{color:var(--accent)}
-      .editor-grid{display:grid;grid-template-columns:minmax(300px,.9fr) minmax(0,1.3fr);gap:18px;align-items:start}.pane{display:grid;gap:10px;align-content:start;min-width:0}
-      .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.toolbar input[type=search]{flex:1;min-width:140px}.toolbar select{width:auto}
-      .scroll{display:grid;gap:8px;align-content:start;max-height:calc(100dvh - 340px);min-height:180px;overflow:auto;padding-right:4px}
-      .citem,.tcard{min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg2)}.citem.in-fav{border-color:var(--accent)}
-      .key{font:12.5px var(--mono);color:var(--info);overflow-wrap:anywhere;font-weight:600}.label{overflow-wrap:anywhere}
-      .pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}.pill{padding:1px 8px;border:1px solid var(--line2);border-radius:5px;background:var(--bg);font-size:11.5px}.pill.added{border-color:var(--ok);color:var(--ok)}.pill.removed{border-color:var(--danger);color:var(--danger);text-decoration:line-through}
-      .group{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.group.favorite{border-color:var(--accent)}
-      .group-head{display:flex;align-items:center;gap:4px;padding:7px 8px;background:var(--surface2)}.group-head .name{flex:1;min-width:0;padding:0 4px;font-weight:700;overflow-wrap:anywhere}
-      .group-body{display:grid;gap:6px;min-height:54px;padding:8px}.group-body.over{background:var(--accent-soft)}
-      .tcard{display:grid;gap:6px;cursor:grab}.tcard.dragging{opacity:.4}.tcard.divider{border-style:dashed;color:var(--muted)}.tcard.raw{font:12px var(--mono);color:var(--muted);white-space:pre-wrap}
-      .controls{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.controls select{width:auto;max-width:150px;min-height:30px;padding:2px 6px;font-size:12px}
-      .checklist{list-style:none;padding:0;margin:0 0 18px;display:grid;gap:8px}.checklist li{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg2)}
-      .dot{display:grid;place-items:center;flex:none;width:22px;height:22px;border-radius:50%;background:var(--surface3);color:var(--muted);font-size:12px;font-weight:800}
-      .checklist li[data-ok=true] .dot{background:var(--ok-soft);color:var(--ok)}.checklist li[data-ok=false] .dot{background:var(--danger-soft);color:var(--danger)}
-      #output{min-height:160px;margin-top:14px}.report{overflow:auto;margin-top:12px}.report table{width:100%;border-collapse:collapse;font-size:12.5px}.report th,.report td{padding:8px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}.report pre{margin:0 0 4px;max-width:480px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px var(--mono)}
-      details>summary{cursor:pointer}.report-sum{font-weight:650}
-      .stepnav{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
-      .toasts{position:fixed;inset:auto auto 20px 50%;margin:0;padding:0;border:0;background:transparent;overflow:visible;color:inherit;z-index:90;display:grid;gap:8px;width:min(580px,calc(100vw - 24px));transform:translateX(-50%);pointer-events:none}
+      .empty{padding:22px 14px;text-align:center;color:var(--muted)}
+      details>summary{cursor:pointer}
       .toast{display:flex;align-items:flex-start;gap:8px;padding:10px 8px 10px 14px;border:1px solid var(--line2);border-radius:12px;background:var(--surface3);box-shadow:var(--shadow);pointer-events:auto;animation:rise .2s ease-out}
       .toast.ok{border-color:var(--ok)}.toast.error{border-color:var(--danger)}.toast-text{flex:1;padding-top:4px;overflow-wrap:anywhere}
       dialog{padding:0;color:var(--text);background:var(--surface);border:1px solid var(--line2);border-radius:16px;box-shadow:var(--shadow)}dialog::backdrop{background:rgba(5,6,10,.62)}
-      .modal{width:min(440px,calc(100vw - 24px))}.modal form{display:grid;gap:14px;padding:22px}.dlg-actions{display:flex;justify-content:flex-end;gap:8px}
-      .drawer{margin:0 0 0 auto;width:min(620px,100vw);height:100dvh;max-height:none;border-radius:16px 0 0 16px;border-right:0}.drawer[open]{display:flex;flex-direction:column;animation:slide .22s ease-out}
-      .drawer-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:18px 20px;border-bottom:1px solid var(--line)}.drawer-body{display:grid;gap:14px;align-content:start;padding:18px 20px 30px;overflow:auto}
-      .entry{display:grid;gap:10px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)}.entry.current{border-color:var(--accent)}.facts{display:flex;flex-wrap:wrap;gap:6px;padding:0;list-style:none}
-      @keyframes rise{from{opacity:0;transform:translateY(8px)}}@keyframes slide{from{opacity:0;transform:translateX(24px)}}
+      .modal{width:min(440px,calc(100vw - 24px))}.dlg-actions{display:flex;justify-content:flex-end;gap:8px}
+      @keyframes rise{from{opacity:0;transform:translateY(8px)}}
       @media (prefers-reduced-motion:reduce){*,::before,::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
-      @media (max-width:1100px){.prompt-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.prompt-sidebar{grid-column:1/-1;position:static}.prompt-nav{display:flex;flex-wrap:wrap;max-height:140px}.pnav{width:auto;max-width:240px}.conflict-grid{grid-template-columns:200px minmax(0,1fr)}.versions.has-base{grid-template-columns:1fr}}
-      @media (max-width:820px){.slots,.grid2,.editor-grid,.prompt-grid,.conflict-grid,.versions,.versions.has-base{grid-template-columns:1fr}.cindex{display:flex;flex-wrap:wrap;max-height:150px}.cidx{width:auto;max-width:100%}
-        .topbar{padding:10px 14px}.stepbar{padding:0 14px}main{padding:16px 14px 90px}.brand p{display:none}.scroll,.prompt-pane-body{max-height:none}.card{padding:16px}.btn.lg{width:100%}}`;
+      @media (max-width:820px){.grid2{grid-template-columns:1fr}
+        .topbar{padding:10px 14px}.stepbar{padding:0 14px}main{padding:16px 14px 90px}.card{padding:16px}}`;
     document.head.appendChild(style);
   }
 
@@ -725,11 +245,10 @@ return module.exports; })();
     const guard = fn => async (...args) => { try { await fn(...args); } catch (e) { console.error(e); notify(e.message, true); } };
     const labels = { plain: '순수 프롬프트', jailbreak: '추가 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
       persona: '페르소나', description: '캐릭터 설명', lorebook: '로어북', chat: '챗', authornote: '작가의 노트',
-      memory: '장기 기억', postEverything: '최종 삽입 프롬프트', cache: '캐시 포인트', mainPrompt: '메인 프롬프트', globalNote: '글로벌 노트',
-      customPromptTemplateToggle: '토글 정의', templateDefaultVariables: '기본 변수', JinjaTemplate: 'Jinja 템플릿', instructChatTemplate: '인스트럭트 템플릿', formatingOrder: '기본 프롬프트 순서' };
+      memory: '장기 기억', postEverything: '최종 삽입 프롬프트', cache: '캐시 포인트' };
     const textKeys = ['text', 'innerFormat', 'defaultText'];
     const promptTypes = ['plain', 'jailbreak', 'cot', 'chatML', 'persona', 'description', 'lorebook', 'chat', 'authornote', 'memory', 'postEverything', 'cache'];
-    const specialTypes = { normal: '일반', main: '메인 프롬프트', globalNote: '글로벌 노트' };
+    const specialTypes = { normal: '특수 타입 없음', main: '메인 프롬프트', globalNote: '글로벌 노트' };
     const plainTypes = ['plain', 'jailbreak', 'cot'];
     const formatTypes = ['persona', 'description', 'lorebook', 'memory', 'authornote', 'postEverything'];
     const roles = { system: '시스템', user: '유저', bot: '캐릭터' };
@@ -761,11 +280,26 @@ return module.exports; })();
     };
     const css = el('style');
     css.textContent = `
-      .pe-tabs{display:flex;gap:8px}.pe-tabs .step{min-height:46px}.pe-top main{padding-bottom:24px}
-      .pe-main{max-width:1440px}.pe-welcome{max-width:720px;margin:42px auto;width:100%;padding:32px}.pe-welcome .drop{margin:22px 0;padding:48px 20px}
-      .pe-heading{margin-bottom:16px}.pe-heading input{font-size:18px;font-weight:700;max-width:520px}
+      /* Scrollbars: thin, rounded, tinted from the existing theme tokens. */
+      *::-webkit-scrollbar{width:12px;height:12px}
+      *::-webkit-scrollbar-track,*::-webkit-scrollbar-corner{background:transparent}
+      *::-webkit-scrollbar-thumb{background:var(--line2);border:3px solid transparent;border-radius:999px;background-clip:padding-box}
+      *::-webkit-scrollbar-thumb:hover{background:var(--faint);border:3px solid transparent;background-clip:padding-box}
+      *::-webkit-scrollbar-thumb:active{background:var(--muted);border:3px solid transparent;background-clip:padding-box}
+      *::-webkit-resizer{background:transparent}
+      @supports not selector(::-webkit-scrollbar){*{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}}
+      .pe-top .topbar{max-width:1440px;min-height:56px;padding-top:0;padding-bottom:0}.pe-top .brand,.pe-top .top-actions{padding:9px 0}
+      .pe-tabs{display:flex;gap:8px;align-self:stretch;margin-right:auto}.pe-tabs .step{min-height:46px}
+      .pe-main{max-width:1440px}.pe-top .pe-main{padding-bottom:24px}
+      .pe-welcome{max-width:720px;margin:42px auto;width:100%;padding:32px;flex:none}.pe-welcome .drop{margin:22px 0;padding:48px 20px}
+      .pe-heading{padding:12px 16px;flex:none}.pe-bar{display:flex;align-items:center;justify-content:space-between;gap:10px 16px;flex-wrap:wrap}
+      .pe-name-field{flex:1 1 300px;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px}.pe-name-field>span{white-space:nowrap}.pe-name-field input{font-size:18px;font-weight:700;max-width:520px}
+      .pe-bar-actions{flex:none}.pe-heading .pe-status{min-height:0;margin-top:6px;overflow-wrap:anywhere}
       .pe-workspace{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:18px;align-items:start}.pe-workspace.no-library{grid-template-columns:minmax(0,1fr)}
-      .pe-document{min-width:0}.pe-blocks{position:relative;max-height:calc(100dvh - 290px);min-height:240px;overflow:auto;padding:2px 8px 12px 2px;overscroll-behavior:contain}
+      .pe-document{min-width:0;display:flex;flex-direction:column}
+      .pe-doc-head{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;margin-bottom:6px;flex:none}.pe-doc-head .viewer-tools{gap:8px 12px}
+      .pe-document>.hint{margin-bottom:10px;flex:none}
+      .pe-blocks{position:relative;max-height:65dvh;min-height:240px;overflow:auto;padding:2px 8px 12px 2px;overscroll-behavior:contain}
       .pe-block{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden;min-width:0;transition:border-color .15s}
       .pe-block.selected{border-color:var(--info)}.pe-block.custom{border-left:3px solid var(--accent)}
       .pe-block-head{display:flex;align-items:center;gap:6px;padding:10px 12px;background:var(--surface2);flex-wrap:wrap}
@@ -776,39 +310,69 @@ return module.exports; })();
       .pe-gap{height:12px;position:relative;transition:height .1s}.pe-gap.active{height:40px;background:var(--accent-soft);border-radius:8px}
       .pe-gap.active::after{content:'여기에 삽입';position:absolute;inset:0;display:grid;place-items:center;color:var(--accent);font-size:12px;border:1px dashed var(--accent);border-radius:8px}
       .pe-block-editor{display:grid;gap:12px;padding:16px;border-top:1px solid var(--line)}.pe-block-editor textarea{min-height:220px;font-size:var(--prompt-font)}
-      .pe-side{position:sticky;top:126px;padding:16px}.pe-side .card-head{margin-bottom:10px}.pe-card-list{display:grid;gap:10px;margin-top:12px;align-content:start}
-      .pe-side .pe-card-list{max-height:calc(100dvh - 340px);overflow:auto;padding:2px}.pe-snippet{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg2);min-width:0}
+      .pe-selects{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;align-items:end}.pe-contents{display:contents}
+      .pe-side{padding:16px}.pe-side .card-head{margin-bottom:10px}.pe-side-actions{margin-bottom:8px}.pe-card-list{display:grid;gap:10px;margin-top:12px;align-content:start}
+      .pe-side .pe-card-list{max-height:330px;overflow:auto;padding:2px}.pe-snippet{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg2);min-width:0}
       .pe-snippet[draggable=true]{cursor:grab}.pe-snippet:hover{border-color:var(--line2)}.pe-snippet h3{overflow-wrap:anywhere}.pe-snippet pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 var(--mono);color:var(--muted);margin:8px 0;max-height:100px;overflow:auto}
-      .pe-manager{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,1fr);gap:18px;align-items:start}.pe-card-form{position:sticky;top:126px;display:grid;gap:14px}.pe-card-form textarea{min-height:330px;font-size:14px}
-      .pe-preview{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.8 var(--mono);padding:14px;border:1px solid var(--line);border-radius:9px;background:var(--bg2);max-height:300px;overflow:auto;margin:0}
-      .pe-status{min-height:20px;color:var(--muted);font-size:12.5px}.pe-fields{padding:0 16px}.pe-fields textarea{min-height:320px}.pe-fields>summary{padding:10px 0;color:var(--muted);font-weight:650}.pe-fields[open]{padding-bottom:16px}.pe-fields[open] .stack{padding-top:8px}
+      .pe-manager{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,1fr);gap:18px;align-items:start}
+      .pe-card-form{display:flex;flex-direction:column;gap:14px}.pe-card-form textarea{min-height:330px;font-size:14px}.pe-grow{flex:1 1 auto;grid-template-rows:auto minmax(0,1fr)}.pe-grow textarea{height:100%}
+      .pe-card-form .actionbar{margin-top:auto}.pe-card-form .actionbar .hint{flex:1;min-width:0;margin-right:auto}
+      .pe-status{min-height:20px;color:var(--muted);font-size:12.5px}.pe-fields{padding:0 16px;margin-top:12px;flex:none}.pe-fields textarea{min-height:200px}.pe-fields>summary{padding:10px 0;color:var(--muted);font-weight:650}.pe-fields[open]{padding-bottom:16px}.pe-fields[open] .stack{padding-top:8px}
       #pe-card-draft-status:empty{display:none}#pe-card-draft-status[data-error=true]{color:var(--danger)}
       .pe-dialog-body{display:grid;gap:14px;padding:22px}
       .pe-blocks:empty::before{content:'블록이 없어. 커스텀 카드를 여기로 드래그해서 첫 블록을 추가해.';display:block;padding:50px 20px;text-align:center;color:var(--muted)}
       .pe-feedback{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);width:min(580px,calc(100vw - 24px));z-index:90}.pe-feedback:empty{display:none}
       @media(max-width:1000px){.pe-workspace{grid-template-columns:minmax(0,1fr) 270px}.pe-manager{grid-template-columns:minmax(0,1fr) minmax(300px,1fr)}}
-      @media(max-width:760px){.pe-workspace,.pe-manager{grid-template-columns:minmax(0,1fr)}.pe-side,.pe-card-form{position:static}.pe-side .pe-card-list{max-height:330px}.pe-blocks{max-height:65dvh}.pe-welcome{margin:16px auto;padding:22px}.pe-tabs{gap:0}.pe-top .top-actions{gap:3px}.pe-top .top-actions .btn{padding:5px 8px}}
+      /* Desktop: app-style shell. Header stays put; block list, library and card form each scroll on their own. */
+      @media(min-width:761px){
+        .pe-top{height:100vh;height:100dvh;display:flex;flex-direction:column}
+        .pe-top .chrome{position:static;flex:none}
+        .pe-top .pe-main{flex:1;min-height:0;width:100%;display:flex;flex-direction:column;gap:0;padding:14px 20px 16px}
+        #pe-edit,#pe-cards{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto}
+        #pe-loaded{flex:1;min-height:0;display:flex;flex-direction:column;gap:12px}
+        .pe-workspace{flex:1;min-height:0;align-items:stretch}
+        .pe-document{min-height:0}.pe-blocks{flex:1;min-height:120px;max-height:none}
+        .pe-fields[open]{max-height:40dvh;overflow:auto}.pe-fields textarea{min-height:140px}
+        .pe-side{min-height:0;display:flex;flex-direction:column}.pe-side .pe-card-list{flex:1;min-height:0;max-height:none}
+        #pe-cards>.card-head{flex:none;margin-bottom:14px}.pe-manager{flex:1;min-height:0;align-items:stretch}
+        .pe-library{display:flex;flex-direction:column;min-height:0}.pe-library .pe-card-list{flex:1;min-height:0;overflow:auto}
+        .pe-card-form{min-height:0;overflow:auto}.pe-card-form textarea{min-height:200px}
+      }
+      @media(max-width:760px){.pe-workspace,.pe-manager{grid-template-columns:minmax(0,1fr)}.pe-side .pe-card-list{max-height:330px}.pe-blocks{max-height:65dvh}.pe-welcome{margin:16px auto;padding:22px}
+        .pe-top .topbar{flex-wrap:wrap;padding:0 14px;gap:0 8px}.pe-tabs{order:3;flex:1 0 100%;margin:0;gap:0}.pe-top .top-actions{gap:3px;margin-left:auto}.pe-top .top-actions .btn{padding:5px 8px}
+        .pe-name-field{flex-basis:100%}.pe-bar-actions{width:100%}.pe-bar-actions .primary{flex:1}.pe-card-form .actionbar{margin-top:0}}
     `;
     document.head.appendChild(css);
     const root = el('div', null, 'pe-top');
     root.innerHTML = `
       <div class="chrome"><header class="topbar"><div class="brand"><span class="mark" aria-hidden="true">✎</span><div><h1>프리셋 에디터</h1></div></div>
-        <div class="top-actions"><button id="pe-theme" type="button" class="btn icon" aria-label="화면 테마 바꾸기">◐</button><button id="pe-close" type="button" class="btn" hidden>닫기</button></div></header>
-        <div class="stepbar"><nav class="pe-tabs" role="tablist" aria-label="에디터 화면"><button id="pe-tab-edit" type="button" class="step" role="tab" aria-controls="pe-edit" aria-selected="true">프리셋 편집</button><button id="pe-tab-cards" type="button" class="step" role="tab" aria-controls="pe-cards" aria-selected="false" tabindex="-1">커스텀 보관함 <span id="pe-card-count" class="count">0</span></button></nav></div></div>
+        <nav class="pe-tabs" role="tablist" aria-label="에디터 화면"><button id="pe-tab-edit" type="button" class="step" role="tab" aria-controls="pe-edit" aria-selected="true">프리셋 편집</button><button id="pe-tab-cards" type="button" class="step" role="tab" aria-controls="pe-cards" aria-selected="false" tabindex="-1">커스텀 보관함 <span id="pe-card-count" class="count">0</span></button></nav>
+        <div class="top-actions"><button id="pe-theme" type="button" class="btn icon" aria-label="화면 테마 바꾸기">◐</button><button id="pe-close" type="button" class="btn" hidden>닫기</button></div></header></div>
       <main class="pe-main">
         <section id="pe-edit" role="tabpanel" aria-labelledby="pe-tab-edit">
           <div id="pe-welcome" class="card pe-welcome"><h2>프리셋 파일 열기</h2><button id="pe-open-empty" class="drop" type="button"><small>여기로 드래그하거나 클릭해서 선택 · .risup · .risupreset · .json</small></button></div>
           <div id="pe-loaded" hidden>
-            <div class="card pe-heading"><div class="row spread"><label class="field grow"><span>결과 프리셋 이름</span><input id="pe-name" type="text" aria-label="결과 프리셋 이름"></label><div class="row"><button id="pe-undo" type="button" class="btn sm" disabled>↶ 실행 취소</button><button id="pe-redo" type="button" class="btn sm" disabled>↷ 다시 실행</button><button id="pe-download" type="button" class="btn primary">완성 프리셋 다운로드</button></div></div>
-              <div class="row spread" style="margin-top:10px"><p id="pe-preset-status" class="pe-status" role="status"></p><button id="pe-toggle-panel" class="btn sm" type="button" aria-expanded="true" aria-controls="pe-sidebar">보관함 접기</button></div>
+            <div class="card pe-heading">
+              <div class="pe-bar"><label class="field pe-name-field"><span>프리셋 이름</span><input id="pe-name" type="text" aria-label="프리셋 이름"></label><div class="row pe-bar-actions"><button id="pe-undo" type="button" class="btn sm" disabled>↶ 실행 취소</button><button id="pe-redo" type="button" class="btn sm" disabled>↷ 다시 실행</button><button id="pe-download" type="button" class="btn primary">편집한 프리셋 다운로드</button></div></div>
+              <p id="pe-preset-status" class="pe-status" role="status"></p>
             </div>
-            <div id="pe-workspace" class="pe-workspace"><div class="pe-document"><div class="row spread" style="margin-bottom:10px"><h2>프리셋 블록 <span id="pe-block-count" class="badge"></span></h2><div class="viewer-tools"><button id="pe-add-block" type="button" class="btn sm">＋ 새 블록 추가</button><label>글자 크기 <select id="pe-font"><option value="13">13px</option><option value="14" selected>14px</option><option value="16">16px</option><option value="18">18px</option></select></label><button id="pe-fold-all" type="button" class="btn ghost sm">모두 접기</button><button id="pe-unfold-all" type="button" class="btn ghost sm">모두 펼치기</button></div></div><p id="pe-block-help" class="hint" style="margin-bottom:10px"></p><div id="pe-blocks" class="pe-blocks" aria-label="프리셋 블록 목록"></div><details class="card pe-fields" style="margin-top:14px"><summary>토글 편집</summary><div id="pe-fields" class="stack"></div></details></div>
-              <aside id="pe-sidebar" class="card pe-side" aria-label="커스텀 카드 보관함"><div class="card-head"><div><h2>커스텀 보관함</h2><p class="hint">카드를 블록 사이로 드래그해.</p></div></div><div class="row"><input id="pe-side-search" type="search" placeholder="이름 · 본문 검색" aria-label="삽입할 카드 검색"></div><div class="row" style="margin-top:8px"><button id="pe-manage-cards" type="button" class="btn sm">카드 관리</button><button id="pe-new-side" type="button" class="btn ghost sm">＋ 카드 작성</button></div><div id="pe-side-list" class="pe-card-list"></div></aside>
+            <div id="pe-workspace" class="pe-workspace">
+              <div class="pe-document">
+                <div class="pe-doc-head"><h2>프리셋 블록 <span id="pe-block-count" class="badge"></span></h2><div class="viewer-tools"><button id="pe-add-block" type="button" class="btn sm">＋ 새 블록 추가</button><button id="pe-fold-all" type="button" class="btn ghost sm">모두 접기</button><button id="pe-unfold-all" type="button" class="btn ghost sm">모두 펼치기</button><label>글자 크기 <select id="pe-font"><option value="13">13px</option><option value="14" selected>14px</option><option value="16">16px</option><option value="18">18px</option></select></label><button id="pe-toggle-panel" class="btn sm" type="button" aria-expanded="true" aria-controls="pe-sidebar">보관함 접기</button></div></div>
+                <p id="pe-block-help" class="hint"></p>
+                <div id="pe-blocks" class="pe-blocks" aria-label="프리셋 블록 목록"></div>
+                <details class="card pe-fields"><summary>토글 편집</summary><div id="pe-fields" class="stack"></div></details>
+              </div>
+              <aside id="pe-sidebar" class="card pe-side" aria-label="커스텀 카드 보관함"><div class="card-head"><div><h2>커스텀 보관함</h2><p class="hint">카드를 블록 사이로 드래그해.</p></div></div><div class="row pe-side-actions"><button id="pe-manage-cards" type="button" class="btn sm">카드 관리</button><button id="pe-new-side" type="button" class="btn ghost sm">＋ 카드 작성</button></div><input id="pe-side-search" type="search" placeholder="이름 · 본문 검색" aria-label="삽입할 카드 검색"><div id="pe-side-list" class="pe-card-list"></div></aside>
             </div>
           </div>
         </section>
-        <section id="pe-cards" role="tabpanel" aria-labelledby="pe-tab-cards" hidden><div class="card-head"><div><h2>커스텀 카드 보관함</h2><p class="lead">자주 쓰는 구문을 저장해.</p></div><button id="pe-new-card" type="button" class="btn primary">＋ 새 카드</button></div><div class="pe-manager" style="margin-top:14px"><div class="card"><input id="pe-card-search" type="search" placeholder="이름 · 본문 검색" aria-label="보관한 카드 검색"><div id="pe-card-list" class="pe-card-list"></div></div>
-          <div id="pe-card-form" class="card pe-card-form"><h3 id="pe-form-title">새 커스텀 카드</h3><label class="field"><span>카드 이름</span><input id="pe-card-name" type="text" maxlength="200" placeholder="예: 서술 스타일"></label><div id="pe-card-options" class="grid2"></div><label id="pe-card-text-field" class="field"><span>커스텀 구문</span><textarea id="pe-card-text" spellcheck="false" placeholder="프리셋에 추가할 구문을 입력해."></textarea></label><div class="actionbar"><button id="pe-card-save" type="button" class="btn primary">카드 저장</button></div><p id="pe-card-draft-status" class="hint" role="status"></p></div></div>
+        <section id="pe-cards" role="tabpanel" aria-labelledby="pe-tab-cards" hidden>
+          <div class="card-head"><div><h2>커스텀 카드 보관함</h2><p class="lead">자주 쓰는 구문을 저장해.</p></div><button id="pe-new-card" type="button" class="btn primary">＋ 새 카드</button></div>
+          <div class="pe-manager">
+            <div class="card pe-library"><input id="pe-card-search" type="search" placeholder="이름 · 본문 검색" aria-label="보관한 카드 검색"><div id="pe-card-list" class="pe-card-list"></div></div>
+            <div id="pe-card-form" class="card pe-card-form"><h3 id="pe-form-title">새 커스텀 카드</h3><label class="field"><span>카드 이름</span><input id="pe-card-name" type="text" maxlength="200"></label><div class="pe-selects"><div id="pe-card-options" class="pe-contents"></div><div id="pe-card-role" class="pe-contents" hidden></div></div><label id="pe-card-text-field" class="field pe-grow"><span>프롬프트</span><textarea id="pe-card-text" spellcheck="false" placeholder="추가할 프롬프트를 입력해."></textarea></label><div class="actionbar"><p id="pe-card-draft-status" class="hint" role="status"></p><button id="pe-card-save" type="button" class="btn primary">카드 저장</button></div></div>
+          </div>
         </section>
       </main><input id="pe-file" type="file" accept=".risup,.risupreset,.json,.preset" hidden><div id="pe-feedback" class="pe-feedback" aria-live="polite"></div><dialog id="pe-dialog" class="modal"></dialog>`;
     document.body.replaceChildren(root);
@@ -971,15 +535,15 @@ return module.exports; })();
         const head = el('div', null, 'pe-block-head');
         const grip = btn('⋮⋮', () => {}, 'btn ghost sm icon pe-grip'); grip.draggable = true; grip.setAttribute('aria-label', titleOf(block) + ' 블록 이동');
         grip.addEventListener('dragstart', event => startDrag(event, { kind: 'block', id: meta.id })); grip.addEventListener('dragend', endDrag);
+        const up = btn('↑', () => move(index, index - 1), 'btn ghost sm icon'), down = btn('↓', () => move(index, index + 2), 'btn ghost sm icon');
+        up.disabled = index === 0; down.disabled = index === blocks.length - 1; up.setAttribute('aria-label', titleOf(block) + ' 위로 이동'); down.setAttribute('aria-label', titleOf(block) + ' 아래로 이동');
         const heading = btn((collapsed.has(meta.id) ? '▸ ' : '▾ ') + titleOf(block), () => { state.selected = meta.id; if (collapsed.has(meta.id)) collapsed.delete(meta.id); else collapsed.add(meta.id); renderBlocks(); }, 'pe-block-title');
         heading.setAttribute('aria-expanded', String(!collapsed.has(meta.id)));
-        head.append(grip, el('span', String(index + 1), 'badge'), heading);
+        head.append(grip, up, down, el('span', String(index + 1), 'badge'), heading);
         if (meta.custom) head.append(el('span', '커스텀', 'badge custom'));
         const modified = meta.original && !C.same(block, meta.original), modifiedBadge = el('span', '수정됨', 'badge changed'); modifiedBadge.hidden = !modified; head.append(modifiedBadge);
         head.append(btn(state.editing === meta.id ? '편집 닫기' : '편집', () => { state.editing = state.editing === meta.id ? '' : meta.id; state.selected = meta.id; renderBlocks(); }));
         const remove = btn('삭제', () => deleteBlock(meta.id), 'btn sm ghost danger'); remove.setAttribute('aria-label', '블록 삭제'); head.append(remove);
-        const up = btn('↑', () => move(index, index - 1), 'btn ghost sm icon'), down = btn('↓', () => move(index, index + 2), 'btn ghost sm icon');
-        up.disabled = index === 0; down.disabled = index === blocks.length - 1; up.setAttribute('aria-label', titleOf(block) + ' 위로 이동'); down.setAttribute('aria-label', titleOf(block) + ' 아래로 이동'); head.append(up, down);
         card.append(head);
         const text = bodyOf(block), preview = el('pre', text || '채팅할 때 RisuAI가 이 블록의 내용을 채워. 직접 지정한 본문은 없어.', 'pe-block-text'); card.append(preview);
         card.append(el('p', [labels[block.type] || block.type, block.type2 && ({ main: '메인', globalNote: '글로벌 노트', normal: '일반' }[block.type2] || block.type2), block.role || block.role2].filter(Boolean).join(' · '), 'pe-block-meta'));
@@ -991,16 +555,16 @@ return module.exports; })();
             heading.textContent = (collapsed.has(meta.id) ? '▸ ' : '▾ ') + titleOf(block); modifiedBadge.hidden = !meta.original || C.same(block, meta.original);
           };
           editor.append(inputField('블록 이름', block.name || '', value => write('name', value), false));
-          const types = el('div', null, 'grid2');
+          const types = el('div', null, 'pe-selects');
           types.append(selectField('프롬프트 타입', Object.fromEntries(promptTypes.map(type => [type, labels[type] || type])), block.type, value => change(() => setPromptType(block, value))));
           if (plainTypes.includes(block.type)) types.append(selectField('특수 타입', specialTypes, block.type2 || 'normal', value => change(() => { block.type2 = value; })));
           editor.append(types);
           const editKeys = plainTypes.includes(block.type) || block.type === 'chatML' ? ['text'] : formatTypes.includes(block.type) ? ['innerFormat', ...(block.type === 'authornote' ? ['defaultText'] : [])] : textKeys.filter(key => typeof block[key] === 'string' && !promptTypes.includes(block.type));
           editKeys.forEach(key => editor.append(inputField(({ text: '본문', innerFormat: '내부 포맷', defaultText: '기본 본문' })[key], block[key] || '', value => write(key, value))));
           if (plainTypes.includes(block.type)) {
-            editor.append(selectField('블록 역할', { system: '시스템', user: '유저', bot: '캐릭터' }, block.role || 'system', value => change(() => { block.role = value; })));
+            types.append(selectField('역할', { system: '시스템', user: '유저', bot: '캐릭터' }, block.role || 'system', value => change(() => { block.role = value; })));
           } else if (formatTypes.includes(block.type)) {
-            editor.append(selectField('블록 역할', { '': '원래 역할 유지', system: '시스템', user: '유저', bot: '캐릭터' }, block.role2 || '', value => change(() => { if (value) block.role2 = value; else delete block.role2; })));
+            types.append(selectField('역할', { '': '원래 역할 유지', system: '시스템', user: '유저', bot: '캐릭터' }, block.role2 || '', value => change(() => { if (value) block.role2 = value; else delete block.role2; })));
           } else if (block.type === 'chat') {
             const range = el('div', null, 'grid2');
             const rangeField = (key, title, fallback) => {
@@ -1015,7 +579,7 @@ return module.exports; })();
           } else if (block.type === 'cache') {
             const depth = inputField('캐시 깊이', String(block.depth ?? 0), () => {}, false), input = depth.querySelector('input'); input.type = 'number'; input.step = '1'; input.min = '0';
             input.addEventListener('change', guard(() => { const value = Number(input.value); if (!input.value.trim() || !Number.isInteger(value) || value < 0) { input.value = String(block.depth ?? 0); throw new Error('캐시 깊이는 0 이상의 정수로 입력해 줘.'); } change(() => { block.depth = value; }); }));
-            editor.append(depth, selectField('캐시 역할', { all: '전체', system: '시스템', user: '유저', assistant: '캐릭터' }, block.role || 'all', value => change(() => { block.role = value; })));
+            const cacheRow = el('div', null, 'grid2'); cacheRow.append(depth, selectField('캐시 역할', { all: '전체', system: '시스템', user: '유저', assistant: '캐릭터' }, block.role || 'all', value => change(() => { block.role = value; }))); editor.append(cacheRow);
           }
           const actions = el('div', null, 'row');
           if (editKeys.length) actions.append(btn('새 커스텀 카드로 저장', () => openCardDraft('', cardFromBlock(block))));
@@ -1068,7 +632,7 @@ return module.exports; })();
       $('card-save').disabled = state.cardBusy; $('new-card').disabled = state.cardBusy;
       $('card-save').textContent = state.cardBusy ? '저장 중…' : '카드 저장';
       $('card-name').disabled = $('card-text').disabled = state.cardBusy;
-      $('card-options').querySelectorAll('select').forEach(select => { select.disabled = state.cardBusy; });
+      $('card-form').querySelectorAll('select').forEach(select => { select.disabled = state.cardBusy; });
       $('card-draft-status').textContent = state.cardBusy ? '커스텀 카드를 저장하고 있어…' : state.cardMessage || (cardDirty() ? '아직 저장하지 않은 내용이 있어.' : '');
       $('card-draft-status').dataset.error = String(!state.cardBusy && state.cardError);
     }
@@ -1079,7 +643,7 @@ return module.exports; })();
       state.cardBefore = cardFormValue(); $('form-title').textContent = id ? '커스텀 카드 수정' : '새 커스텀 카드'; renderCardStatus();
     }
     function renderCardOptions() {
-      const settings = state.cardSettings, container = $('card-options'); container.replaceChildren();
+      const settings = state.cardSettings, container = $('card-options'), roleContainer = $('card-role'); container.replaceChildren(); roleContainer.replaceChildren(); roleContainer.hidden = true;
       const update = (key, value) => {
         state.cardSettings = cardSettings({ ...state.cardSettings, [key]: value }); state.cardMessage = ''; state.cardError = false;
         renderCardOptions(); renderCardStatus();
@@ -1088,7 +652,7 @@ return module.exports; })();
       if (plainTypes.includes(settings.type)) container.append(selectField('특수 타입', specialTypes, settings.type2, value => update('type2', value)));
       if (plainTypes.includes(settings.type) || formatTypes.includes(settings.type) || settings.type === 'cache') {
         const options = settings.type === 'cache' ? { all: '전체', system: '시스템', user: '유저', assistant: '캐릭터' } : formatTypes.includes(settings.type) ? { '': '원래 역할 유지', ...roles } : roles;
-        container.append(selectField('블록 역할', options, settings.role, value => update('role', value)));
+        roleContainer.append(selectField('블록 역할', options, settings.role, value => update('role', value))); roleContainer.hidden = false;
       }
       $('card-text-field').hidden = !cardUsesText(settings.type);
     }
@@ -1199,7 +763,7 @@ return module.exports; })();
     $('download').addEventListener('click', guard(async () => {
       if (state.busy || !state.draft) return;
       const preset = C.sanitizePreset(C.parsePreset(JSON.stringify(state.draft))); state.busy = true; updateStatus();
-      try { const bytes = await C.exportPresetFile(preset), fileName = String(preset.name || '프리셋').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_') + '_preset.risup'; download(fileName, bytes, 'application/octet-stream'); state.saved = clone(preset); notify('완성 프리셋을 만들었어. RisuAI의 프리셋 가져오기로 적용해.'); }
+      try { const bytes = await C.exportPresetFile(preset), fileName = String(preset.name || '프리셋').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_') + '_preset.risup'; download(fileName, bytes, 'application/octet-stream'); state.saved = clone(preset); notify('편집한 프리셋을 다운로드했어. RisuAI의 프리셋 가져오기로 적용해.'); }
       finally { state.busy = false; updateStatus(); }
     }));
     const themePref = api?.safeLocalStorage || { getItem: key => localStorage.getItem(key), setItem: (key, value) => localStorage.setItem(key, value) };
