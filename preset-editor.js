@@ -243,7 +243,7 @@ return module.exports; })();
     const $ = id => root.querySelector('#pe-' + id);
     const btn = (label, fn, cls = 'btn sm') => { const b = el('button', label, cls); b.type = 'button'; b.addEventListener('click', guard(fn)); return b; };
     const guard = fn => async (...args) => { try { await fn(...args); } catch (e) { console.error(e); notify(e.message, true); } };
-    const labels = { plain: '순수 프롬프트', jailbreak: '추가 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
+    const labels = { plain: '순수 프롬프트', jailbreak: '탈옥 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
       persona: '페르소나', description: '캐릭터 설명', lorebook: '로어북', chat: '챗', authornote: '작가의 노트',
       memory: '장기 기억', postEverything: '최종 삽입 프롬프트', cache: '캐시 포인트' };
     const textKeys = ['text', 'innerFormat', 'defaultText'];
@@ -353,7 +353,7 @@ return module.exports; })();
           <div id="pe-welcome" class="card pe-welcome"><h2>프리셋 파일 열기</h2><button id="pe-open-empty" class="drop" type="button"><small>여기로 드래그하거나 클릭해서 선택 · .risup · .risupreset · .json</small></button></div>
           <div id="pe-loaded" hidden>
             <div class="card pe-heading">
-              <div class="pe-bar"><label class="field pe-name-field"><span>프리셋 이름</span><input id="pe-name" type="text" aria-label="프리셋 이름"></label><div class="row pe-bar-actions"><button id="pe-undo" type="button" class="btn sm" disabled>↶ 실행 취소</button><button id="pe-redo" type="button" class="btn sm" disabled>↷ 다시 실행</button><button id="pe-download" type="button" class="btn primary">편집한 프리셋 다운로드</button></div></div>
+              <div class="pe-bar"><label class="field pe-name-field"><span>프리셋 이름</span><input id="pe-name" type="text" aria-label="프리셋 이름"></label><div class="row pe-bar-actions"><button id="pe-cancel" type="button" class="btn sm danger">편집 취소</button><button id="pe-undo" type="button" class="btn sm" disabled>↶ 실행 취소</button><button id="pe-redo" type="button" class="btn sm" disabled>↷ 다시 실행</button><button id="pe-download" type="button" class="btn primary">편집한 프리셋 다운로드</button></div></div>
               <p id="pe-preset-status" class="pe-status" role="status"></p>
             </div>
             <div id="pe-workspace" class="pe-workspace">
@@ -412,7 +412,7 @@ return module.exports; })();
     function updateStatus() {
       $('loaded').inert = state.busy; $('welcome').inert = state.busy;
       $('undo').disabled = !state.history.length || state.busy; $('redo').disabled = !state.future.length || state.busy;
-      $('download').disabled = !state.draft || state.busy;
+      $('download').disabled = !state.draft || state.busy; $('cancel').disabled = !state.draft || state.busy;
       const blocks = state.draft?.promptTemplate;
       $('add-block').disabled = !Array.isArray(blocks) || state.busy;
       $('block-count').textContent = Array.isArray(blocks) ? blocks.length + '개' : '기본 형식';
@@ -737,6 +737,13 @@ return module.exports; })();
     $('welcome').addEventListener('dragleave', () => $('open-empty').classList.remove('dragover'));
     $('welcome').addEventListener('drop', guard(async event => { if (!event.dataTransfer?.files.length) return; event.preventDefault(); $('open-empty').classList.remove('dragover'); await openPreset(event.dataTransfer.files[0]); }));
     $('name').addEventListener('input', () => change(() => { state.draft.name = $('name').value; }, 'preset-name', false)); $('name').addEventListener('blur', () => { state.historyGroup = ''; });
+    $('cancel').addEventListener('click', guard(async () => {
+      if (state.busy || !state.draft) return;
+      if (isDirty() && !await confirmAction('편집을 취소할까?', '지금까지 편집한 내용이 사라지고 프리셋 불러오기 화면으로 돌아가. 필요하면 먼저 완성본을 다운로드해 줘.', true)) return;
+      endDrag(); state.original = state.draft = null; state.meta = []; state.selected = state.editing = state.fileName = '';
+      state.history = []; state.future = []; state.historyGroup = ''; state.saved = ''; collapsed.clear();
+      renderDocument(); updateStatus(); $('open-empty').focus(); notify('편집을 취소했어. 다른 프리셋을 열 수 있어.');
+    }));
     $('undo').addEventListener('click', () => travel(state.history, state.future)); $('redo').addEventListener('click', () => travel(state.future, state.history));
     root.addEventListener('keydown', event => {
       if (event.key === 'Escape') endDrag();
