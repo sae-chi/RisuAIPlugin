@@ -1,6 +1,6 @@
 //@name preset_editor
 //@api 3.0
-//@version 1.0.0
+//@version 1.0.1
 //@display-name 프리셋 에디터
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/preset-editor.js
 
@@ -545,7 +545,7 @@ return module.exports; })();
         head.append(btn(state.editing === meta.id ? '편집 닫기' : '편집', () => { state.editing = state.editing === meta.id ? '' : meta.id; state.selected = meta.id; renderBlocks(); }));
         const remove = btn('삭제', () => deleteBlock(meta.id), 'btn sm ghost danger'); remove.setAttribute('aria-label', '블록 삭제'); head.append(remove);
         card.append(head);
-        const text = bodyOf(block), preview = el('pre', text || '채팅할 때 RisuAI가 이 블록의 내용을 채워. 직접 지정한 본문은 없어.', 'pe-block-text'); card.append(preview);
+        const text = bodyOf(block), preview = el('pre', text || '직접 지정한 본문이 없어.', 'pe-block-text'); card.append(preview);
         card.append(el('p', [labels[block.type] || block.type, block.type2 && ({ main: '메인', globalNote: '글로벌 노트', normal: '일반' }[block.type2] || block.type2), block.role || block.role2].filter(Boolean).join(' · '), 'pe-block-meta'));
         if (state.editing === meta.id) {
           const editor = el('div', null, 'pe-block-editor');
@@ -701,7 +701,7 @@ return module.exports; })();
       state.meta = (clean.promptTemplate || []).map(block => ({ id: uid(), original: clone(block), custom: false }));
       state.selected = ''; state.editing = ''; state.history = []; state.future = []; state.historyGroup = ''; state.saved = ''; collapsed.clear();
       state.meta.forEach(meta => collapsed.add(meta.id));
-      tab('edit'); renderDocument(); notify('프리셋을 열었어. 본문을 읽고 직접 편집해 봐.');
+      tab('edit'); renderDocument(); notify('프리셋을 열었어.');
     }
     async function openPreset(file) {
       if (!file || state.busy) return;
