@@ -368,7 +368,7 @@ return module.exports; })();
           </div>
         </section>
         <section id="pe-cards" role="tabpanel" aria-labelledby="pe-tab-cards" hidden>
-          <div class="card-head"><div><h2>커스텀 카드 보관함</h2><p class="lead">자주 쓰는 구문을 저장해.</p></div><button id="pe-new-card" type="button" class="btn primary">＋ 새 카드</button></div>
+          <div class="card-head"><div><h2>커스텀 카드 보관함</h2><p class="lead">자주 쓰는 프롬프트를 저장해.</p></div><button id="pe-new-card" type="button" class="btn primary">＋ 새 카드</button></div>
           <div class="pe-manager">
             <div class="card pe-library"><input id="pe-card-search" type="search" placeholder="이름 · 본문 검색" aria-label="보관한 카드 검색"><div id="pe-card-list" class="pe-card-list"></div></div>
             <div id="pe-card-form" class="card pe-card-form"><h3 id="pe-form-title">새 커스텀 카드</h3><label class="field"><span>카드 이름</span><input id="pe-card-name" type="text" maxlength="200"></label><div class="pe-selects"><div id="pe-card-options" class="pe-contents"></div><div id="pe-card-role" class="pe-contents" hidden></div></div><label id="pe-card-text-field" class="field pe-grow"><span>프롬프트</span><textarea id="pe-card-text" spellcheck="false" placeholder="추가할 프롬프트를 입력해."></textarea></label><div class="actionbar"><p id="pe-card-draft-status" class="hint" role="status"></p><button id="pe-card-save" type="button" class="btn primary">카드 저장</button></div></div>
@@ -585,7 +585,7 @@ return module.exports; })();
           if (editKeys.length) actions.append(btn('새 커스텀 카드로 저장', () => openCardDraft('', cardFromBlock(block))));
           const source = state.cards.find(entry => entry.id === meta.cardId);
           if (source && editKeys.length) actions.append(btn('보관한 카드에 반영', async () => {
-            if (!await confirmAction('보관한 카드도 수정할까?', '“' + source.name + '” 카드의 이름과 구문을 현재 블록 내용으로 바꿔. 이미 삽입한 다른 블록은 그대로야.')) return;
+            if (!await confirmAction('보관한 카드도 수정할까?', '“' + source.name + '” 카드의 이름과 프롬프트를 현재 블록 내용으로 바꿔. 이미 삽입한 다른 블록은 그대로야.')) return;
             await mutateCards(cards => { const target = cards.find(entry => entry.id === source.id); if (!target) throw new Error('보관한 카드가 없어. 새 카드로 저장해 줘.'); Object.assign(target, cardFromBlock(block), { name: titleOf(block).slice(0, 200) }); });
             notify('보관한 카드에 반영했어.');
           }));
@@ -666,7 +666,7 @@ return module.exports; })();
       const node = el('article', null, 'pe-snippet'); node.dataset.cardId = card.id;
       if (compact && Array.isArray(state.draft?.promptTemplate)) { node.draggable = true; node.addEventListener('dragstart', event => startDrag(event, { kind: 'card', card: clone(card) })); node.addEventListener('dragend', endDrag); }
       node.append(el('h3', card.name));
-      if (cardUsesText(card.type)) node.append(el('pre', card.text || '(빈 구문)'));
+      if (cardUsesText(card.type)) node.append(el('pre', card.text || '(빈 프롬프트)'));
       const settings = cardSettings(card), badges = el('div', null, 'row');
       badges.append(el('span', labels[settings.type] || settings.type, 'badge'));
       if (plainTypes.includes(settings.type)) badges.append(el('span', specialTypes[settings.type2], 'badge'));
@@ -691,7 +691,7 @@ return module.exports; })();
     function renderSide() {
       const list = $('side-list'), scrollTop = list.scrollTop; list.replaceChildren();
       filteredCards($('side-search').value).forEach(card => list.append(snippetNode(card, true)));
-      if (!list.childElementCount) list.append(el('p', !state.cardsReady ? '보관함을 읽지 못했어. 플러그인을 다시 열어 줘.' : state.cards.length ? '검색 결과가 없어.' : '저장한 카드가 없어. ＋ 카드 작성으로 구문을 보관해.', 'empty'));
+      if (!list.childElementCount) list.append(el('p', !state.cardsReady ? '보관함을 읽지 못했어. 플러그인을 다시 열어 줘.' : state.cards.length ? '검색 결과가 없어.' : '저장한 카드가 없어. ＋ 카드 작성으로 커스텀 프롬프트를 보관해.', 'empty'));
       list.scrollTop = scrollTop;
     }
     async function replaceDocument(preset, fileName) {
@@ -724,7 +724,7 @@ return module.exports; })();
       const id = state.cardId, name = $('card-name').value.trim(), text = $('card-text').value;
       const settings = { ...state.cardSettings };
       try {
-        if (!name || (cardUsesText(settings.type) && !text.trim())) { (!name ? $('card-name') : $('card-text')).focus(); throw new Error('카드 이름과 구문을 입력해 줘.'); }
+        if (!name || (cardUsesText(settings.type) && !text.trim())) { (!name ? $('card-name') : $('card-text')).focus(); throw new Error('카드 이름과 프롬프트를 입력해 줘.'); }
         const savedId = id || uid();
         await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === savedId); if (id && index < 0) throw new Error('수정할 카드가 없어. 새 카드로 작성해 줘.'); const card = { id: savedId, name, text, ...settings }; if (index < 0) cards.push(card); else cards[index] = card; });
         fillCardDraft(savedId, { name, text, ...settings }); state.cardMessage = '“' + name + '” 카드를 저장했어.'; renderCardStatus(); notify('커스텀 카드를 보관했어.');
