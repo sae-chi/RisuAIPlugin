@@ -1,7 +1,7 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.12.3
+//@version 1.12.4
 //@arg summary_prompt string Default summary prompt
 
 (async () => {
@@ -21,9 +21,36 @@
     let managerOpen = false
     let autoTimer = null
     let autoPrompt = null
+    let autoSelection = null
     let observedCharacter = null
     let observedChatIds = new Set()
+    const AUTO_POLL_INTERVAL = 2000
+    const AUTO_OPTION_CACHE_TTL = 30000
+    const autoOptionCache = new Map()
     const autoOptionKey = charId => 'memoryBank::autoLoad::' + charId
+
+    function resetAutoObservation() {
+      observedCharacter = null
+      observedChatIds.clear()
+    }
+
+    function cacheAutoOption(charId, enabled) {
+      const previous = autoOptionCache.get(charId)
+      autoOptionCache.set(charId, { enabled, checkedAt: Date.now() })
+      // Enabling starts from a new baseline, including chats created while disabled.
+      if (previous?.enabled !== enabled && observedCharacter === charId) resetAutoObservation()
+    }
+
+    async function getAutoOption(charId, refresh = false) {
+      const cached = autoOptionCache.get(charId)
+      if (!refresh && cached && Date.now() - cached.checkedAt < AUTO_OPTION_CACHE_TTL) return cached.enabled
+      const enabled = await Risuai.pluginStorage.getItem(autoOptionKey(charId)) === '1'
+      if (unloaded) return false
+      // A settings save during this read takes precedence over its stale result.
+      if (autoOptionCache.get(charId) !== cached) return autoOptionCache.get(charId).enabled
+      cacheAutoOption(charId, enabled)
+      return enabled
+    }
 
     function isFreshChat(chat) {
       return !!chat?.id && (chat.message ?? []).length === 0 &&
@@ -89,31 +116,53 @@
 
     async function pollNewChats() {
       try {
-        const char = await Risuai.getCharacter()
+        const selectionKey = await Risuai.getCurrentCharacterIndex()
         if (unloaded) return
+        let char
+        if (!autoSelection || autoSelection.key !== selectionKey) {
+          resetAutoObservation()
+          char = await Risuai.getCharacter()
+          if (unloaded || await Risuai.getCurrentCharacterIndex() !== selectionKey) return
+          // Keep the API's selection key as-is: versions may return a number or a string.
+          autoSelection = char?.chaId ? { key: selectionKey, charId: char.chaId } : null
+        }
+        const charId = autoSelection?.charId
+        if (!charId || !await getAutoOption(charId)) {
+          resetAutoObservation()
+          if (autoPrompt && !autoPrompt.applying) await closeAutoPrompt()
+          return
+        }
+        // Disabled characters only need the small selection-key and cached-option checks.
+        char ??= await Risuai.getCharacter()
+        if (unloaded) return
+        if (char?.chaId !== charId) {
+          autoSelection = null
+          resetAutoObservation()
+          if (autoPrompt && !autoPrompt.applying) await closeAutoPrompt()
+          return
+        }
         const chat = char?.chats?.[char.chatPage]
         if (autoPrompt && !autoPrompt.applying &&
           (char?.chaId !== autoPrompt.owner.charId || chat?.id !== autoPrompt.owner.chatId || !isFreshChat(chat))) {
           await closeAutoPrompt()
         }
-        if (!char?.chaId) { observedCharacter = null; observedChatIds.clear(); return }
         const ids = new Set((char.chats ?? []).map(c => c.id).filter(Boolean))
         const created = observedCharacter === char.chaId && chat?.id && !observedChatIds.has(chat.id)
         // First observation and character switches establish a baseline, never prompt.
         observedCharacter = char.chaId
         observedChatIds = ids
         if (!created || !isFreshChat(chat) || managerOpen || autoPrompt || manualBusy) return
-        if (await Risuai.pluginStorage.getItem(autoOptionKey(char.chaId)) !== '1') return
         const slots = await getSlotList(char.chaId)
         if (!slots.length) return
         const live = await Risuai.getCharacter()
         const liveChat = live?.chats?.[live.chatPage]
-        if (live?.chaId !== char.chaId || liveChat?.id !== chat.id || !isFreshChat(liveChat)) return
+        if (unloaded || autoOptionCache.get(charId)?.enabled !== true ||
+          live?.chaId !== char.chaId || liveChat?.id !== chat.id || !isFreshChat(liveChat)) return
         await showAutoPrompt(live, liveChat, slots)
       } catch (error) {
         console.warn('[Hypa Manager] 새 채팅 확인 실패:', error)
       } finally {
-        if (!unloaded) autoTimer = setTimeout(pollNewChats, 1000)
+        if (!unloaded) autoTimer = setTimeout(pollNewChats, AUTO_POLL_INTERVAL)
       }
     }
 
@@ -1531,8 +1580,8 @@
         try { await importLegacySlots(char) } catch (error) { showMsg('memory-msg', error.message, true) }
       })
       const autoCheckbox = document.getElementById('auto-memory-enabled')
-      Risuai.pluginStorage.getItem(autoOptionKey(charId)).then(value => {
-        autoCheckbox.checked = value === '1'
+      getAutoOption(charId, true).then(enabled => {
+        autoCheckbox.checked = enabled
         autoCheckbox.disabled = false
       }).catch(error => showMsg('memory-msg', '옵션 읽기 실패: ' + error.message, true))
       autoCheckbox.addEventListener('change', async () => {
@@ -1540,6 +1589,7 @@
         autoCheckbox.disabled = true
         try {
           await Risuai.pluginStorage.setItem(autoOptionKey(charId), enabled ? '1' : '0')
+          cacheAutoOption(charId, enabled)
         } catch (error) {
           autoCheckbox.checked = !enabled
           showMsg('memory-msg', '옵션 저장 실패: ' + error.message, true)
@@ -1591,6 +1641,8 @@
         unloaded = true
         clearTimeout(autoTimer)
         await closeAutoPrompt()
+        autoOptionCache.clear()
+        autoSelection = null
         eventSessions.clear()
         if (summaryBodyInterceptor?.id && typeof Risuai.unregisterBodyIntercepter === 'function') {
           try { await Risuai.unregisterBodyIntercepter(summaryBodyInterceptor.id) } catch {}
@@ -1621,7 +1673,7 @@
     )
 
     await pollNewChats()
-    console.log('[Hypa Manager] Plugin loaded v1.12.2')
+    console.log('[Hypa Manager] Plugin loaded v1.12.4')
   } catch (error) {
     console.log('[Hypa Manager] Error: ' + error.message)
   }
