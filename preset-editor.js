@@ -243,7 +243,7 @@ return module.exports; })();
     const $ = id => root.querySelector('#pe-' + id);
     const btn = (label, fn, cls = 'btn sm') => { const b = el('button', label, cls); b.type = 'button'; b.addEventListener('click', guard(fn)); return b; };
     const guard = fn => async (...args) => { try { await fn(...args); } catch (e) { console.error(e); notify(e.message, true); } };
-    const labels = { plain: '순수 프롬프트', jailbreak: '추가 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
+    const labels = { plain: '순수 프롬프트', jailbreak: '탈옥 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
       persona: '페르소나', description: '캐릭터 설명', lorebook: '로어북', chat: '챗', authornote: '작가의 노트',
       memory: '장기 기억', postEverything: '최종 삽입 프롬프트', cache: '캐시 포인트' };
     const textKeys = ['text', 'innerFormat', 'defaultText'];
