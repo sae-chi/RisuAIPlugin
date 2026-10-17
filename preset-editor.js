@@ -1,6 +1,6 @@
 //@name preset_editor
 //@api 3.0
-//@version 1.0.2
+//@version 1.0.3
 //@display-name 프리셋 에디터
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/preset-editor.js
 
@@ -299,6 +299,14 @@ return module.exports; })();
       .pe-workspace{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:18px;align-items:start}.pe-workspace.no-library{grid-template-columns:minmax(0,1fr)}
       .pe-document{min-width:0;display:flex;flex-direction:column}
       .pe-doc-head{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;margin-bottom:6px;flex:none}.pe-doc-head .viewer-tools{gap:8px 12px}
+      .pe-more{position:relative}.pe-more-panel{position:absolute;right:0;top:calc(100% + 6px);z-index:40;display:grid;gap:4px;min-width:180px;padding:8px;border:1px solid var(--line2);border-radius:10px;background:var(--surface);box-shadow:var(--shadow)}
+      .pe-more-panel .btn{justify-content:flex-start}.pe-more-panel label{justify-content:space-between;padding:6px 10px;border-top:1px solid var(--line);margin-top:4px}
+      .pe-block-search{flex:none;min-width:0;padding:12px;margin:4px 0 12px;border:1px solid var(--line2);border-radius:12px;background:var(--surface)}
+      .pe-block-search .row{flex-wrap:nowrap}.pe-block-search input{flex:1;min-width:0}.pe-block-search .hint{margin-top:6px}
+      .pe-search-results{display:grid;gap:6px;max-height:190px;overflow:auto;margin-top:8px}
+      .pe-search-result{display:grid;gap:3px;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg2);text-align:left;overflow-wrap:anywhere}
+      .pe-search-result:hover{border-color:var(--info);background:var(--info-soft)}.pe-search-result strong{font-size:13px}.pe-search-result span{font:12px/1.6 var(--mono);white-space:pre-wrap;color:var(--muted)}
+      .pe-search-mark{background:var(--accent);color:var(--accent-ink);border-radius:2px}
       .pe-document>.hint{margin-bottom:10px;flex:none}
       .pe-blocks{position:relative;max-height:65dvh;min-height:240px;overflow:auto;padding:2px 8px 12px 2px;overscroll-behavior:contain}
       .pe-block{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden;min-width:0;transition:border-color .15s}
@@ -361,7 +369,11 @@ return module.exports; })();
             </div>
             <div id="pe-workspace" class="pe-workspace">
               <div class="pe-document">
-                <div class="pe-doc-head"><h2>프리셋 블록 <span id="pe-block-count" class="badge"></span></h2><div class="viewer-tools"><button id="pe-add-block" type="button" class="btn sm">＋ 새 블록 추가</button><button id="pe-fold-all" type="button" class="btn ghost sm">모두 접기</button><button id="pe-unfold-all" type="button" class="btn ghost sm">모두 펼치기</button><label>글자 크기 <select id="pe-font"><option value="13">13px</option><option value="14" selected>14px</option><option value="16">16px</option><option value="18">18px</option></select></label><button id="pe-toggle-panel" class="btn sm" type="button" aria-expanded="true" aria-controls="pe-sidebar">보관함 접기</button></div></div>
+                <div class="pe-doc-head"><h2>프리셋 블록 <span id="pe-block-count" class="badge"></span></h2><div class="viewer-tools">
+                  <button id="pe-add-block" type="button" class="btn sm">＋ 새 블록 추가</button><button id="pe-toggle-search" type="button" class="btn sm" aria-expanded="false" aria-controls="pe-block-search-panel">⌕ 검색</button>
+                  <div id="pe-more" class="pe-more"><button id="pe-toggle-more" type="button" class="btn sm icon" aria-label="더보기" aria-expanded="false" aria-controls="pe-more-panel">…</button><div id="pe-more-panel" class="pe-more-panel" role="group" aria-label="블록 보기 설정" hidden><button id="pe-fold-all" type="button" class="btn ghost sm">모두 접기</button><button id="pe-unfold-all" type="button" class="btn ghost sm">모두 펼치기</button><label>글자 크기 <select id="pe-font"><option value="13">13px</option><option value="14" selected>14px</option><option value="16">16px</option><option value="18">18px</option></select></label></div></div>
+                  <button id="pe-toggle-panel" class="btn sm" type="button" aria-expanded="true" aria-controls="pe-sidebar">보관함 접기</button></div></div>
+                <section id="pe-block-search-panel" class="pe-block-search" aria-label="전체 프롬프트 검색" hidden><div class="row"><input id="pe-block-search" type="search" placeholder="모든 블록의 이름 · 본문 검색" aria-label="전체 블록 검색어" aria-describedby="pe-block-search-status" aria-controls="pe-block-search-results"><button id="pe-close-search" type="button" class="btn ghost sm icon" aria-label="검색 닫기">✕</button></div><p id="pe-block-search-status" class="hint" role="status"></p><div id="pe-block-search-results" class="pe-search-results" hidden></div></section>
                 <p id="pe-block-help" class="hint"></p>
                 <div id="pe-blocks" class="pe-blocks" aria-label="프리셋 블록 목록"></div>
                 <details class="card pe-fields"><summary>토글 편집</summary><div id="pe-fields" class="stack"></div></details>
@@ -399,7 +411,7 @@ return module.exports; })();
       });
     }
     function tab(name, focus = false) {
-      endDrag(); state.tab = name;
+      endDrag(); setMore(false); state.tab = name;
       ['edit', 'cards'].forEach(key => { $(key).hidden = key !== name; $('tab-' + key).setAttribute('aria-selected', String(key === name)); $('tab-' + key).tabIndex = key === name ? 0 : -1; });
       if (focus) $('tab-' + name).focus();
       if (name === 'cards') renderCards();
@@ -418,10 +430,71 @@ return module.exports; })();
       $('download').disabled = !state.draft || state.busy; $('cancel').disabled = !state.draft || state.busy;
       const blocks = state.draft?.promptTemplate;
       $('add-block').disabled = !Array.isArray(blocks) || state.busy;
+      $('toggle-search').disabled = !Array.isArray(blocks) || state.busy;
       $('block-count').textContent = Array.isArray(blocks) ? blocks.length + '개' : '기본 형식';
       $('preset-status').textContent = state.busy ? '파일을 처리하는 중이야…' : state.saved && C.same(state.draft, state.saved) ? '현재 내용으로 파일을 만들었어. RisuAI에서 프리셋을 가져와 적용해.' : (state.fileName ? state.fileName + ' · ' : '') + (isDirty() ? '편집한 내용이 있어.' : '프리셋을 불러왔어.');
       $('toggle-panel').textContent = state.panel ? '보관함 접기' : '보관함 펼치기'; $('toggle-panel').setAttribute('aria-expanded', String(state.panel));
       $('sidebar').hidden = !state.panel; $('workspace').classList.toggle('no-library', !state.panel);
+    }
+    function setMore(open, focus = false) {
+      $('more-panel').hidden = !open; $('toggle-more').setAttribute('aria-expanded', String(open));
+      if (focus) (open ? $('fold-all') : $('toggle-more')).focus();
+    }
+    function setBlockSearch(open, focus = false) {
+      $('block-search-panel').hidden = !open; $('toggle-search').setAttribute('aria-expanded', String(open));
+      if (!open) $('block-search').value = '';
+      renderBlockSearch();
+      if (focus) (open ? $('block-search') : $('toggle-search')).focus();
+    }
+    function searchPattern() {
+      const query = $('block-search-panel').hidden ? '' : $('block-search').value;
+      return query ? new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : null;
+    }
+    function highlightSearch(node, text, pattern) {
+      node.replaceChildren();
+      if (!pattern) { node.textContent = text; return; }
+      pattern.lastIndex = 0;
+      let match, offset = 0, count = 0;
+      // Bound markup for very large prompts and short queries; the original text stays intact.
+      while (count < 200 && (match = pattern.exec(text))) {
+        node.append(document.createTextNode(text.slice(offset, match.index)), el('mark', match[0], 'pe-search-mark'));
+        offset = match.index + match[0].length; count++;
+      }
+      node.append(document.createTextNode(text.slice(offset)));
+    }
+    function renderBlockSearch() {
+      const pattern = searchPattern(), results = $('block-search-results'); results.replaceChildren();
+      const blocks = state.draft?.promptTemplate;
+      let total = 0;
+      if (pattern && Array.isArray(blocks)) blocks.forEach((block, index) => {
+        const title = titleOf(block), body = bodyOf(block);
+        pattern.lastIndex = 0; const titleMatch = pattern.test(title);
+        pattern.lastIndex = 0; const bodyMatch = pattern.exec(body);
+        if (!titleMatch && !bodyMatch) return;
+        total++;
+        if (total > 100) return;
+        const result = btn('', () => {
+          const id = state.meta[index]?.id; if (!id) return;
+          state.selected = id; state.editing = ''; collapsed.delete(id); renderBlocks();
+          const card = Array.from($('blocks').querySelectorAll('.pe-block')).find(node => node.dataset.id === id);
+          card?.querySelector('.pe-block-title')?.focus({ preventScroll: true });
+          card?.scrollIntoView({ block: 'nearest' });
+          const mark = card?.querySelector('.pe-block-text mark');
+          mark?.scrollIntoView({ block: 'nearest' });
+        }, 'pe-search-result');
+        const heading = el('strong'); highlightSearch(heading, (index + 1) + '. ' + title, pattern); result.append(heading);
+        if (body) {
+          const at = bodyMatch?.index ?? 0, start = Math.max(0, at - 45), end = Math.min(body.length, at + (bodyMatch?.[0].length || 0) + 100);
+          const snippet = el('span'); highlightSearch(snippet, (start ? '…' : '') + body.slice(start, end) + (end < body.length ? '…' : ''), pattern); result.append(snippet);
+        }
+        results.append(result);
+      });
+      results.hidden = !total;
+      $('block-search-status').textContent = !pattern ? '접힌 블록도 검색해. 대소문자를 구분하지 않아.' : total ? total + '개 블록에서 찾았어.' + (total > 100 ? ' 처음 100개만 표시해. 검색어를 더 입력해 줘.' : ' 결과를 누르면 해당 블록으로 이동해.') : '검색 결과가 없어.';
+      $('blocks').querySelectorAll('.pe-block').forEach(card => {
+        const block = blocks?.[Number(card.dataset.index)];
+        if (block) highlightSearch(card.querySelector('.pe-block-text'), bodyOf(block) || '직접 지정한 본문이 없어.', pattern);
+      });
     }
     function inputField(labelText, value, apply, multiline = true) {
       const label = el('label', null, 'field'), input = el(multiline ? 'textarea' : 'input');
@@ -528,7 +601,7 @@ return module.exports; })();
       const list = $('blocks'), scrollTop = list.scrollTop; list.replaceChildren();
       const blocks = state.draft.promptTemplate;
       $('block-help').textContent = Array.isArray(blocks) ? '블록을 펼쳐 본문을 확인하고, 카드를 원하는 블록 사이로 드래그해. ⋮⋮ 손잡이로 기존 블록도 옮길 수 있어.' : '이 프리셋은 순서형 블록을 사용하지 않아. 토글 정의를 편집할 수 있어. 카드 삽입은 블록형 프리셋에서 사용할 수 있어.';
-      if (!Array.isArray(blocks)) { list.append(el('p', '기본 형식 프리셋 · 토글 편집을 사용할 수 있어.', 'empty')); return; }
+      if (!Array.isArray(blocks)) { list.append(el('p', '기본 형식 프리셋 · 토글 편집을 사용할 수 있어.', 'empty')); renderBlockSearch(); return; }
       const appendGap = index => { const gap = el('div', null, 'pe-gap'); gap.dataset.index = String(index); gap.setAttribute('aria-hidden', 'true'); list.append(gap); };
       blocks.forEach((block, index) => {
         appendGap(index); const meta = state.meta[index];
@@ -556,6 +629,7 @@ return module.exports; })();
             change(() => { block[key] = value; }, meta.id + ':' + key, false);
             preview.textContent = bodyOf(block) || '직접 지정한 본문은 없어.';
             heading.textContent = (collapsed.has(meta.id) ? '▸ ' : '▾ ') + titleOf(block); modifiedBadge.hidden = !meta.original || C.same(block, meta.original);
+            renderBlockSearch();
           };
           editor.append(inputField('블록 이름', block.name || '', value => write('name', value), false));
           const types = el('div', null, 'pe-selects');
@@ -600,6 +674,7 @@ return module.exports; })();
       if (!blocks.length) list.append(el('p', '커스텀 카드를 여기로 드래그해서 첫 블록을 추가해.', 'empty'));
       appendGap(blocks.length);
       list.scrollTop = scrollTop;
+      renderBlockSearch();
     }
     function validateCards(value) {
       if (!object(value) || value.type !== 'preset-editor-custom-cards' || value.version !== 1 || !Array.isArray(value.cards)) throw new Error('커스텀 보관함 형식이 올바르지 않아.');
@@ -710,6 +785,7 @@ return module.exports; })();
       state.meta = (clean.promptTemplate || []).map(block => ({ id: uid(), original: clone(block), custom: false }));
       state.selected = ''; state.editing = ''; state.history = []; state.future = []; state.historyGroup = ''; state.saved = ''; collapsed.clear();
       state.meta.forEach(meta => collapsed.add(meta.id));
+      setBlockSearch(false); setMore(false);
       tab('edit'); renderDocument(); notify('프리셋을 열었어.');
     }
     async function openPreset(file) {
@@ -751,19 +827,31 @@ return module.exports; })();
       if (isDirty() && !await confirmAction('편집을 취소할까?', '지금까지 편집한 내용이 사라지고 프리셋 불러오기 화면으로 돌아가. 필요하면 먼저 완성본을 다운로드해 줘.', true)) return;
       endDrag(); state.original = state.draft = null; state.meta = []; state.selected = state.editing = state.fileName = '';
       state.history = []; state.future = []; state.historyGroup = ''; state.saved = ''; collapsed.clear();
+      setBlockSearch(false); setMore(false);
       renderDocument(); updateStatus(); $('open-empty').focus(); notify('편집을 취소했어. 다른 프리셋을 열 수 있어.');
     }));
     $('undo').addEventListener('click', () => travel(state.history, state.future)); $('redo').addEventListener('click', () => travel(state.future, state.history));
     root.addEventListener('keydown', event => {
-      if (event.key === 'Escape') endDrag();
+      if (event.key === 'Escape') {
+        endDrag();
+        if (!$('more-panel').hidden) { event.preventDefault(); setMore(false, true); }
+        else if ($('block-search-panel').contains(event.target)) { event.preventDefault(); setBlockSearch(false, true); }
+      }
       if (state.tab !== 'edit' || event.target.matches('input,textarea,select,[contenteditable=true]') || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return;
       event.preventDefault(); if (event.shiftKey) travel(state.future, state.history); else travel(state.history, state.future);
     });
     $('toggle-panel').addEventListener('click', () => { state.panel = !state.panel; updateStatus(); });
     $('add-block').addEventListener('click', addBlock);
+    $('toggle-search').addEventListener('click', () => { setMore(false); setBlockSearch($('block-search-panel').hidden, true); });
+    $('close-search').addEventListener('click', () => setBlockSearch(false, true));
+    $('block-search').addEventListener('input', renderBlockSearch);
+    $('block-search').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); $('block-search-results').querySelector('button')?.click(); } });
+    $('toggle-more').addEventListener('click', () => setMore($('more-panel').hidden));
+    document.addEventListener('click', event => { if (!$('more').contains(event.target)) setMore(false); });
+    $('more').addEventListener('focusout', event => { if (event.relatedTarget && !$('more').contains(event.relatedTarget)) setMore(false); });
     $('font').addEventListener('change', () => document.documentElement.style.setProperty('--prompt-font', $('font').value + 'px'));
-    $('fold-all').addEventListener('click', () => { state.meta.forEach(meta => collapsed.add(meta.id)); renderBlocks(); });
-    $('unfold-all').addEventListener('click', () => { collapsed.clear(); renderBlocks(); });
+    $('fold-all').addEventListener('click', () => { state.meta.forEach(meta => collapsed.add(meta.id)); renderBlocks(); setMore(false, true); });
+    $('unfold-all').addEventListener('click', () => { collapsed.clear(); renderBlocks(); setMore(false, true); });
     $('blocks').addEventListener('dragover', event => {
       const index = locateGap(event); if (index == null || state.busy) return;
       event.preventDefault(); event.dataTransfer.dropEffect = state.drag.kind === 'card' ? 'copy' : 'move';
