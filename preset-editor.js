@@ -1,6 +1,6 @@
 //@name preset_editor
 //@api 3.0
-//@version 1.0.1
+//@version 1.0.2
 //@display-name 프리셋 에디터
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/preset-editor.js
 
@@ -243,7 +243,7 @@ return module.exports; })();
     const $ = id => root.querySelector('#pe-' + id);
     const btn = (label, fn, cls = 'btn sm') => { const b = el('button', label, cls); b.type = 'button'; b.addEventListener('click', guard(fn)); return b; };
     const guard = fn => async (...args) => { try { await fn(...args); } catch (e) { console.error(e); notify(e.message, true); } };
-    const labels = { plain: '순수 프롬프트', jailbreak: '탈옥 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
+    const labels = { plain: '순수 프롬프트', jailbreak: '추가 프롬프트', cot: '생각의 사슬', chatML: 'ChatML',
       persona: '페르소나', description: '캐릭터 설명', lorebook: '로어북', chat: '챗', authornote: '작가의 노트',
       memory: '장기 기억', postEverything: '최종 삽입 프롬프트', cache: '캐시 포인트' };
     const textKeys = ['text', 'innerFormat', 'defaultText'];
@@ -265,6 +265,7 @@ return module.exports; })();
         role: formatTypes.includes(block.type) ? block.role2 ?? '' : block.role }) };
     }
     function blockFromCard(card) {
+      // Only prompt fields enter the preset; the memo belongs to the card library.
       const settings = cardSettings(card), block = { type: settings.type, name: card.name };
       if (plainTypes.includes(block.type)) Object.assign(block, { text: card.text, type2: settings.type2, role: settings.role });
       else if (formatTypes.includes(block.type)) { block.innerFormat = card.text; if (settings.role) block.role2 = settings.role; }
@@ -317,6 +318,8 @@ return module.exports; })();
       .pe-manager{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,1fr);gap:18px;align-items:start}
       .pe-card-form{display:flex;flex-direction:column;gap:14px}.pe-card-form textarea{min-height:330px;font-size:14px}.pe-grow{flex:1 1 auto;grid-template-rows:auto minmax(0,1fr)}.pe-grow textarea{height:100%}
       .pe-card-form .actionbar{margin-top:auto}.pe-card-form .actionbar .hint{flex:1;min-width:0;margin-right:auto}
+      .pe-card-form #pe-card-memo{min-height:100px;font:13px/1.65 var(--ui)}
+      .pe-snippet-memo{margin:8px 0;color:var(--muted);font-size:12px}.pe-snippet-memo p{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:120px;overflow:auto}
       .pe-status{min-height:20px;color:var(--muted);font-size:12.5px}.pe-fields{padding:0 16px;margin-top:12px;flex:none}.pe-fields textarea{min-height:200px}.pe-fields>summary{padding:10px 0;color:var(--muted);font-weight:650}.pe-fields[open]{padding-bottom:16px}.pe-fields[open] .stack{padding-top:8px}
       #pe-card-draft-status:empty{display:none}#pe-card-draft-status[data-error=true]{color:var(--danger)}
       .pe-dialog-body{display:grid;gap:14px;padding:22px}
@@ -363,15 +366,15 @@ return module.exports; })();
                 <div id="pe-blocks" class="pe-blocks" aria-label="프리셋 블록 목록"></div>
                 <details class="card pe-fields"><summary>토글 편집</summary><div id="pe-fields" class="stack"></div></details>
               </div>
-              <aside id="pe-sidebar" class="card pe-side" aria-label="커스텀 카드 보관함"><div class="card-head"><div><h2>커스텀 보관함</h2><p class="hint">카드를 블록 사이로 드래그해.</p></div></div><div class="row pe-side-actions"><button id="pe-manage-cards" type="button" class="btn sm">카드 관리</button><button id="pe-new-side" type="button" class="btn ghost sm">＋ 카드 작성</button></div><input id="pe-side-search" type="search" placeholder="이름 · 본문 검색" aria-label="삽입할 카드 검색"><div id="pe-side-list" class="pe-card-list"></div></aside>
+              <aside id="pe-sidebar" class="card pe-side" aria-label="커스텀 카드 보관함"><div class="card-head"><div><h2>커스텀 보관함</h2><p class="hint">카드를 블록 사이로 드래그해.</p></div></div><div class="row pe-side-actions"><button id="pe-manage-cards" type="button" class="btn sm">카드 관리</button><button id="pe-new-side" type="button" class="btn ghost sm">＋ 카드 작성</button></div><input id="pe-side-search" type="search" placeholder="이름 · 본문 · 메모 검색" aria-label="삽입할 카드 검색"><div id="pe-side-list" class="pe-card-list"></div></aside>
             </div>
           </div>
         </section>
         <section id="pe-cards" role="tabpanel" aria-labelledby="pe-tab-cards" hidden>
           <div class="card-head"><div><h2>커스텀 카드 보관함</h2><p class="lead">자주 쓰는 프롬프트를 저장해.</p></div><button id="pe-new-card" type="button" class="btn primary">＋ 새 카드</button></div>
           <div class="pe-manager">
-            <div class="card pe-library"><input id="pe-card-search" type="search" placeholder="이름 · 본문 검색" aria-label="보관한 카드 검색"><div id="pe-card-list" class="pe-card-list"></div></div>
-            <div id="pe-card-form" class="card pe-card-form"><h3 id="pe-form-title">새 커스텀 카드</h3><label class="field"><span>카드 이름</span><input id="pe-card-name" type="text" maxlength="200"></label><div class="pe-selects"><div id="pe-card-options" class="pe-contents"></div><div id="pe-card-role" class="pe-contents" hidden></div></div><label id="pe-card-text-field" class="field pe-grow"><span>프롬프트</span><textarea id="pe-card-text" spellcheck="false" placeholder="추가할 프롬프트를 입력해."></textarea></label><div class="actionbar"><p id="pe-card-draft-status" class="hint" role="status"></p><button id="pe-card-save" type="button" class="btn primary">카드 저장</button></div></div>
+            <div class="card pe-library"><input id="pe-card-search" type="search" placeholder="이름 · 본문 · 메모 검색" aria-label="보관한 카드 검색"><div id="pe-card-list" class="pe-card-list"></div></div>
+            <div id="pe-card-form" class="card pe-card-form"><h3 id="pe-form-title">새 커스텀 카드</h3><label class="field"><span>카드 이름</span><input id="pe-card-name" type="text" maxlength="200"></label><div class="pe-selects"><div id="pe-card-options" class="pe-contents"></div><div id="pe-card-role" class="pe-contents" hidden></div></div><label id="pe-card-text-field" class="field pe-grow"><span>프롬프트</span><textarea id="pe-card-text" spellcheck="false" placeholder="추가할 프롬프트를 입력해."></textarea></label><label class="field"><span>메모</span><textarea id="pe-card-memo" aria-describedby="pe-card-memo-hint" placeholder="사용법이나 주의사항을 적어 둬."></textarea></label><p id="pe-card-memo-hint" class="hint">메모는 보관함에만 저장돼. 프리셋에 삽입하거나 다운로드할 때는 포함되지 않아.</p><div class="actionbar"><p id="pe-card-draft-status" class="hint" role="status"></p><button id="pe-card-save" type="button" class="btn primary">카드 저장</button></div></div>
           </div>
         </section>
       </main><input id="pe-file" type="file" accept=".risup,.risupreset,.json,.preset" hidden><div id="pe-feedback" class="pe-feedback" aria-live="polite"></div><dialog id="pe-dialog" class="modal"></dialog>`;
@@ -603,10 +606,11 @@ return module.exports; })();
       const ids = new Set();
       value.cards.forEach(card => {
         if (!object(card) || typeof card.id !== 'string' || !card.id || ids.has(card.id) || typeof card.name !== 'string' || !card.name.trim() || card.name.length > 200 || typeof card.text !== 'string') throw new Error('커스텀 카드 내용이 올바르지 않아.');
+        if (own(card, 'memo') && typeof card.memo !== 'string') throw new Error('커스텀 카드의 메모는 문자열이어야 해.');
         if ((own(card, 'type') && (typeof card.type !== 'string' || !card.type)) || (own(card, 'type2') && (typeof card.type2 !== 'string' || !own(specialTypes, card.type2))) || (own(card, 'role') && !['', 'system', 'user', 'bot', 'assistant', 'char', 'all'].includes(card.role))) throw new Error('커스텀 카드의 타입이나 역할이 올바르지 않아.');
         ids.add(card.id);
       });
-      return value.cards.map(({ id, name, text, ...settings }) => ({ id, name, text, ...cardSettings(settings) }));
+      return value.cards.map(({ id, name, text, memo = '', ...settings }) => ({ id, name, text, memo, ...cardSettings(settings) }));
     }
     async function loadCards() {
       if (state.cardBusy) return;
@@ -625,19 +629,19 @@ return module.exports; })();
         if (cleanDraft && editingId && state.cardId === editingId && !cardDirty()) { const current = cards.find(card => card.id === editingId); fillCardDraft(current ? editingId : '', current || {}); }
       } finally { state.cardBusy = false; renderCards(); renderSide(); }
     }
-    function cardFormValue() { return JSON.stringify({ name: $('card-name').value, text: $('card-text').value, ...state.cardSettings }); }
+    function cardFormValue() { return JSON.stringify({ name: $('card-name').value, text: $('card-text').value, memo: $('card-memo').value, ...state.cardSettings }); }
     function cardDirty() { return cardFormValue() !== state.cardBefore; }
     function renderCardStatus() {
       $('card-count').textContent = String(state.cards.length);
       $('card-save').disabled = state.cardBusy; $('new-card').disabled = state.cardBusy;
       $('card-save').textContent = state.cardBusy ? '저장 중…' : '카드 저장';
-      $('card-name').disabled = $('card-text').disabled = state.cardBusy;
+      $('card-name').disabled = $('card-text').disabled = $('card-memo').disabled = state.cardBusy;
       $('card-form').querySelectorAll('select').forEach(select => { select.disabled = state.cardBusy; });
       $('card-draft-status').textContent = state.cardBusy ? '커스텀 카드를 저장하고 있어…' : state.cardMessage || (cardDirty() ? '아직 저장하지 않은 내용이 있어.' : '');
       $('card-draft-status').dataset.error = String(!state.cardBusy && state.cardError);
     }
     function fillCardDraft(id = '', values = {}) {
-      state.cardId = id; $('card-name').value = values.name || ''; $('card-text').value = values.text || '';
+      state.cardId = id; $('card-name').value = values.name || ''; $('card-text').value = values.text || ''; $('card-memo').value = values.memo || '';
       state.cardSettings = cardSettings(values); renderCardOptions();
       state.cardMessage = ''; state.cardError = false;
       state.cardBefore = cardFormValue(); $('form-title').textContent = id ? '커스텀 카드 수정' : '새 커스텀 카드'; renderCardStatus();
@@ -667,14 +671,19 @@ return module.exports; })();
       if (compact && Array.isArray(state.draft?.promptTemplate)) { node.draggable = true; node.addEventListener('dragstart', event => startDrag(event, { kind: 'card', card: clone(card) })); node.addEventListener('dragend', endDrag); }
       node.append(el('h3', card.name));
       if (cardUsesText(card.type)) node.append(el('pre', card.text || '(빈 프롬프트)'));
+      if (card.memo) {
+        const memo = el('details', null, 'pe-snippet-memo');
+        memo.append(el('summary', '메모'), el('p', card.memo)); node.append(memo);
+      }
       const settings = cardSettings(card), badges = el('div', null, 'row');
       badges.append(el('span', labels[settings.type] || settings.type, 'badge'));
       if (plainTypes.includes(settings.type)) badges.append(el('span', specialTypes[settings.type2], 'badge'));
       if (plainTypes.includes(settings.type) || formatTypes.includes(settings.type) || settings.type === 'cache') badges.append(el('span', settings.role ? ({ ...roles, assistant: '캐릭터', all: '전체' }[settings.role] || settings.role) : '원래 역할 유지', 'badge'));
       node.append(badges);
+      if (compact) return node;
       const actions = el('div', null, 'row');
       actions.append(btn('수정', () => openCardDraft(card.id), 'btn ghost sm'));
-      if (!compact) actions.append(btn('삭제', async () => {
+      actions.append(btn('삭제', async () => {
         if (state.cardBusy || !await confirmAction('카드를 삭제할까?', '“' + card.name + '”을 보관함에서 삭제해. 프리셋에 삽입한 블록은 그대로 남아.', true)) return;
         if (state.cardId === card.id && cardDirty() && !await confirmAction('작성 중인 내용도 지울까?', '이 카드에 아직 저장하지 않은 수정이 있어.', true)) return;
         await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === card.id); if (index < 0) throw new Error('카드가 이미 삭제됐어.'); cards.splice(index, 1); });
@@ -682,7 +691,7 @@ return module.exports; })();
       }, 'btn ghost sm danger'));
       node.append(actions); return node;
     }
-    function filteredCards(query) { const text = query.toLocaleLowerCase().trim(); return state.cards.filter(card => !text || (card.name + '\n' + card.text).toLocaleLowerCase().includes(text)); }
+    function filteredCards(query) { const text = query.toLocaleLowerCase().trim(); return state.cards.filter(card => !text || (card.name + '\n' + card.text + '\n' + (card.memo || '')).toLocaleLowerCase().includes(text)); }
     function renderCards() {
       renderCardStatus(); const list = $('card-list'); list.replaceChildren();
       filteredCards($('card-search').value).forEach(card => list.append(snippetNode(card, false)));
@@ -717,17 +726,17 @@ return module.exports; })();
     $('manage-cards').addEventListener('click', () => tab('cards'));
     $('new-card').addEventListener('click', guard(() => openCardDraft())); $('new-side').addEventListener('click', guard(() => openCardDraft()));
     const cardInputChanged = () => { state.cardMessage = ''; state.cardError = false; renderCardStatus(); };
-    $('card-name').addEventListener('input', cardInputChanged); $('card-text').addEventListener('input', cardInputChanged);
+    $('card-name').addEventListener('input', cardInputChanged); $('card-text').addEventListener('input', cardInputChanged); $('card-memo').addEventListener('input', cardInputChanged);
     // Sandboxed frames can block submission before a submit handler runs. Save directly on click.
     $('card-save').addEventListener('click', guard(async () => {
       if (state.cardBusy) return;
-      const id = state.cardId, name = $('card-name').value.trim(), text = $('card-text').value;
+      const id = state.cardId, name = $('card-name').value.trim(), text = $('card-text').value, memo = $('card-memo').value;
       const settings = { ...state.cardSettings };
       try {
         if (!name || (cardUsesText(settings.type) && !text.trim())) { (!name ? $('card-name') : $('card-text')).focus(); throw new Error('카드 이름과 프롬프트를 입력해 줘.'); }
         const savedId = id || uid();
-        await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === savedId); if (id && index < 0) throw new Error('수정할 카드가 없어. 새 카드로 작성해 줘.'); const card = { id: savedId, name, text, ...settings }; if (index < 0) cards.push(card); else cards[index] = card; });
-        fillCardDraft(savedId, { name, text, ...settings }); state.cardMessage = '“' + name + '” 카드를 저장했어.'; renderCardStatus(); notify('커스텀 카드를 보관했어.');
+        await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === savedId); if (id && index < 0) throw new Error('수정할 카드가 없어. 새 카드로 작성해 줘.'); const card = { id: savedId, name, text, memo, ...settings }; if (index < 0) cards.push(card); else cards[index] = card; });
+        fillCardDraft(savedId, { name, text, memo, ...settings }); state.cardMessage = '“' + name + '” 카드를 저장했어.'; renderCardStatus(); notify('커스텀 카드를 보관했어.');
       } catch (error) { state.cardMessage = '저장하지 못했어: ' + error.message; state.cardError = true; renderCardStatus(); notify(state.cardMessage, true); }
     }));
     $('card-search').addEventListener('input', renderCards); $('side-search').addEventListener('input', renderSide);
