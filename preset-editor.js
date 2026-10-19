@@ -1,6 +1,6 @@
 //@name preset_editor
 //@api 3.0
-//@version 1.0.3
+//@version 1.0.5
 //@display-name 프리셋 에디터
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/preset-editor.js
 
@@ -323,11 +323,14 @@ return module.exports; })();
       .pe-side{padding:16px}.pe-side .card-head{margin-bottom:10px}.pe-side-actions{margin-bottom:8px}.pe-card-list{display:grid;gap:10px;margin-top:12px;align-content:start}
       .pe-side .pe-card-list{max-height:330px;overflow:auto;padding:2px}.pe-snippet{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--bg2);min-width:0}
       .pe-snippet[draggable=true]{cursor:grab}.pe-snippet:hover{border-color:var(--line2)}.pe-snippet h3{overflow-wrap:anywhere}.pe-snippet pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 var(--mono);color:var(--muted);margin:8px 0;max-height:100px;overflow:auto}
+      .pe-snippet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;flex-wrap:wrap}.pe-snippet-head h3{flex:1;min-width:0}.pe-snippet-head .row{flex:none}
+      .pe-snippet-title{display:flex;align-items:baseline;gap:6px;width:100%;padding:0;border:0;background:transparent;font:inherit;text-align:left;overflow-wrap:anywhere}.pe-snippet-title:hover{color:var(--accent)}.pe-snippet-arrow{flex:none;transition:transform .15s}.pe-snippet-title[aria-expanded=true] .pe-snippet-arrow{transform:rotate(90deg)}
+      .pe-snippet-tags{margin-top:8px}.pe-snippet-body{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}.pe-snippet-body pre{max-height:270px;margin:0}
       .pe-manager{display:grid;grid-template-columns:minmax(0,1fr) minmax(340px,1fr);gap:18px;align-items:start}
       .pe-card-form{display:flex;flex-direction:column;gap:14px}.pe-card-form textarea{min-height:330px;font-size:14px}.pe-grow{flex:1 1 auto;grid-template-rows:auto minmax(0,1fr)}.pe-grow textarea{height:100%}
       .pe-card-form .actionbar{margin-top:auto}.pe-card-form .actionbar .hint{flex:1;min-width:0;margin-right:auto}
       .pe-card-form #pe-card-memo{min-height:100px;font:13px/1.65 var(--ui)}
-      .pe-snippet-memo{margin:8px 0;color:var(--muted);font-size:12px}.pe-snippet-memo p{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:120px;overflow:auto}
+      .pe-snippet-memo{margin-top:10px;padding:10px 12px;border:1px solid var(--line2);border-radius:8px;background:var(--surface);color:var(--muted);font-size:12px}.pe-snippet-memo strong{color:var(--text);font-weight:650}.pe-snippet-memo p{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:120px;overflow:auto}
       .pe-status{min-height:20px;color:var(--muted);font-size:12.5px}.pe-fields{padding:0 16px;margin-top:12px;flex:none}.pe-fields textarea{min-height:200px}.pe-fields>summary{padding:10px 0;color:var(--muted);font-weight:650}.pe-fields[open]{padding-bottom:16px}.pe-fields[open] .stack{padding-top:8px}
       #pe-card-draft-status:empty{display:none}#pe-card-draft-status[data-error=true]{color:var(--danger)}
       .pe-dialog-body{display:grid;gap:14px;padding:22px}
@@ -744,27 +747,39 @@ return module.exports; })();
     function snippetNode(card, compact) {
       const node = el('article', null, 'pe-snippet'); node.dataset.cardId = card.id;
       if (compact && Array.isArray(state.draft?.promptTemplate)) { node.draggable = true; node.addEventListener('dragstart', event => startDrag(event, { kind: 'card', card: clone(card) })); node.addEventListener('dragend', endDrag); }
-      node.append(el('h3', card.name));
-      if (cardUsesText(card.type)) node.append(el('pre', card.text || '(빈 프롬프트)'));
-      if (card.memo) {
-        const memo = el('details', null, 'pe-snippet-memo');
-        memo.append(el('summary', '메모'), el('p', card.memo)); node.append(memo);
-      }
-      const settings = cardSettings(card), badges = el('div', null, 'row');
+      const head = el('div', null, 'pe-snippet-head'), title = el('h3');
+      const body = cardUsesText(card.type) ? el('div', null, 'pe-snippet-body') : null;
+      if (body) {
+        body.id = 'pe-card-body-' + uid(); body.hidden = true;
+        const toggle = btn('', () => { body.hidden = !body.hidden; toggle.setAttribute('aria-expanded', String(!body.hidden)); }, 'pe-snippet-title');
+        toggle.setAttribute('aria-expanded', 'false'); toggle.setAttribute('aria-controls', body.id);
+        const arrow = el('span', '▸', 'pe-snippet-arrow'); arrow.setAttribute('aria-hidden', 'true');
+        toggle.append(arrow, el('span', card.name)); title.append(toggle);
+        body.append(el('pre', card.text || '(빈 프롬프트)'));
+      } else title.textContent = card.name;
+      head.append(title); node.append(head);
+      const settings = cardSettings(card), badges = el('div', null, 'row pe-snippet-tags');
       badges.append(el('span', labels[settings.type] || settings.type, 'badge'));
       if (plainTypes.includes(settings.type)) badges.append(el('span', specialTypes[settings.type2], 'badge'));
       if (plainTypes.includes(settings.type) || formatTypes.includes(settings.type) || settings.type === 'cache') badges.append(el('span', settings.role ? ({ ...roles, assistant: '캐릭터', all: '전체' }[settings.role] || settings.role) : '원래 역할 유지', 'badge'));
       node.append(badges);
-      if (compact) return node;
-      const actions = el('div', null, 'row');
-      actions.append(btn('수정', () => openCardDraft(card.id), 'btn ghost sm'));
-      actions.append(btn('삭제', async () => {
-        if (state.cardBusy || !await confirmAction('카드를 삭제할까?', '“' + card.name + '”을 보관함에서 삭제해. 프리셋에 삽입한 블록은 그대로 남아.', true)) return;
-        if (state.cardId === card.id && cardDirty() && !await confirmAction('작성 중인 내용도 지울까?', '이 카드에 아직 저장하지 않은 수정이 있어.', true)) return;
-        await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === card.id); if (index < 0) throw new Error('카드가 이미 삭제됐어.'); cards.splice(index, 1); });
-        if (state.cardId === card.id) fillCardDraft(); notify('보관한 카드를 삭제했어.');
-      }, 'btn ghost sm danger'));
-      node.append(actions); return node;
+      if (!compact) {
+        const actions = el('div', null, 'row');
+        actions.append(btn('수정', () => openCardDraft(card.id), 'btn ghost sm'));
+        actions.append(btn('삭제', async () => {
+          if (state.cardBusy || !await confirmAction('카드를 삭제할까?', '“' + card.name + '”을 보관함에서 삭제해. 프리셋에 삽입한 블록은 그대로 남아.', true)) return;
+          if (state.cardId === card.id && cardDirty() && !await confirmAction('작성 중인 내용도 지울까?', '이 카드에 아직 저장하지 않은 수정이 있어.', true)) return;
+          await mutateCards(cards => { const index = cards.findIndex(entry => entry.id === card.id); if (index < 0) throw new Error('카드가 이미 삭제됐어.'); cards.splice(index, 1); });
+          if (state.cardId === card.id) fillCardDraft(); notify('보관한 카드를 삭제했어.');
+        }, 'btn ghost sm danger'));
+        head.append(actions);
+      }
+      if (body) node.append(body);
+      if (card.memo) {
+        const memo = el('div', null, 'pe-snippet-memo');
+        memo.append(el('strong', '메모'), el('p', card.memo)); node.append(memo);
+      }
+      return node;
     }
     function filteredCards(query) { const text = query.toLocaleLowerCase().trim(); return state.cards.filter(card => !text || (card.name + '\n' + card.text + '\n' + (card.memo || '')).toLocaleLowerCase().includes(text)); }
     function renderCards() {
