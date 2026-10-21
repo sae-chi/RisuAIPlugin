@@ -1,7 +1,7 @@
 //@name gigatrans_utility
 //@display-name GigaTrans Utility
 //@api 3.0
-//@version 1.7.3
+//@version 1.7.6
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/GigaTrans-utility.js
 
 ;(async function () {
@@ -1233,7 +1233,7 @@
     return toolPrefWrites;
   }
   function newToolDraft() {
-    return {includeDesc:true,includeFirst:true,includePersona:true,recent:20,selected:new Set(),
+    return {includeDesc:true,includeFirst:true,includePersona:true,parseCBS:false,recent:20,selected:new Set(),
       result:'',previous:null,suffix:'1',rows:[],previousRows:null,hasGenerated:false};
   }
   function toolSession(target) {
@@ -1279,34 +1279,89 @@
     }
     state.lores=items;state.loaded=true;state.warning=warning;
   }
-  function recentToolMessages(chat,count) {
+  async function assertToolSelection(target) {
+    if(stopped)throw new Error('플러그인이 종료되었습니다.');
+    const ci=await R.getCurrentCharacterIndex(),hi=await R.getCurrentChatIndex();
+    if(ci!==target.ci||hi!==target.hi)throw new Error('현재 채팅이 바뀌었습니다. 원래 채팅으로 돌아온 뒤 다시 시도하세요. 초안은 보존됩니다.');
+  }
+  async function parseToolText(target,text,label,options={},enabled=true) {
+    if(!enabled)return String(text||'');
+    if(!text)return '';
+    // The host parser always uses the active chat, not the snapshots held by this UI.
+    // Full identity validation brackets collection; per-text checks avoid copying whole chats repeatedly.
+    await assertToolSelection(target);
+    let parsed;
+    try {
+      if(typeof R.parseRisuChat!=='function')throw new Error('현재 RisuAI는 parseRisuChat을 지원하지 않습니다. RisuAI를 업데이트하세요.');
+      parsed=await R.parseRisuChat(String(text),{...options,processRegex:false,runVar:false,rmVar:true});
+      if(typeof parsed!=='string')throw new Error('CBS 파서가 텍스트를 반환하지 않았습니다. RisuAI를 업데이트하세요.');
+      if(parsed.startsWith('ERROR: Call stack limit reached'))throw new Error('CBS 호출 깊이 제한을 초과했습니다.');
+    }catch(e){throw new Error(label+' CBS 해석 실패: '+(e?.message||String(e))+' 원문을 사용하려면 CBS 파싱 적용을 해제하세요.');}
+    await assertToolSelection(target);
+    return parsed;
+  }
+  function toolLorePreview(state,item,parseCBS,onToggle) {
+    const title=item.entry.comment||'이름 없는 로어북',prefix='기본 키: '+(item.entry.key||'(없음)')+'\n\n';
+    const body=el('pre',{textContent:prefix+(parseCBS?'펼치면 CBS를 해석합니다.':(item.entry.content||''))});
+    const preview=el('details');let revision=0;
+    preview.append(el('summary',{},[
+      el('span',{className:'tool-lore-name',textContent:title}),
+      el('span',{className:'tool-lore-meta',textContent:' · '+item.label+(item.entry.useRegex?' · 정규식':'')})
+    ]),body);
+    preview.addEventListener('toggle',async()=>{
+      const request=++revision;
+      if(!preview.isConnected)return;
+      onToggle(preview.open);
+      if(!preview.open||!parseCBS)return;
+      const target=state.target;
+      const active=()=>preview.isConnected&&preview.open&&request===revision;
+      body.textContent=prefix+'CBS 해석 중…';
+      try {
+        await freshToolTarget(target);
+        const content=await parseToolText(target,item.entry.content||'','로어북 “'+title+'”');
+        await freshToolTarget(target);
+        if(active())body.textContent=prefix+(content.trim()?content:'(현재 CBS 조건에서 본문이 비어 있습니다.)');
+      }catch(e){if(active())body.textContent=prefix+(e?.message||String(e));}
+    });
+    return preview;
+  }
+  async function recentToolMessages(chat,count,target,parseCBS=true) {
     if(!count)return [];
     const selected=[];
     for(let i=chat.message.length-1;i>=0&&selected.length<count;i--) {
       const m=chat.message[i];if(m.disabled==='allBefore')break;
       if(m.disabled===true||m.isComment||!['user','char'].includes(m.role))continue;
-      const text=tokenText(splitMessage(m.data||'').original,false);
+      const original=tokenText(splitMessage(m.data||'').original,false);
+      const text=tokenText(await parseToolText(target,original,'최근 대화 '+(i+1),{messageIndex:i,role:m.role,cbsConditions:{chatRole:m.role}},parseCBS),false);
       if(text)selected.unshift({role:m.role,speaker:m.name||'',text});
     }
     return selected;
   }
   async function collectToolContext(state,draft) {
     const {char,chat}=await freshToolTarget(state.target);
+    const parseText=(text,label,options)=>parseToolText(state.target,text,label,options,draft.parseCBS!==false);
     const context={character:{name:char.nickname||char.name}};
-    if(draft.includeDesc)context.character.description=String(char.desc||'');
+    if(draft.includeDesc)context.character.description=await parseText(String(char.desc||''),'캐릭터 설명');
     if(draft.includeFirst) {
       const index=chat.fmIndex??-1;
-      context.firstMessage=tokenText(splitMessage((index>=0?char.alternateGreetings?.[index]:char.firstMessage)||char.firstMessage||'').original,false);
+      const first=(index>=0?char.alternateGreetings?.[index]:char.firstMessage)||char.firstMessage||'';
+      const parsed=await parseText(first,'첫 메시지',{messageIndex:-1,role:'char',cbsConditions:{firstmsg:true,chatRole:'char'}});
+      context.firstMessage=tokenText(splitMessage(parsed).original,false);
     }
-    if(draft.recent)context.recentMessages=recentToolMessages(chat,draft.recent);
+    if(draft.recent)context.recentMessages=await recentToolMessages(chat,draft.recent,state.target,draft.parseCBS!==false);
     if(draft.includePersona) {
       const db=await R.getDatabase(['personas','selectedPersona']);
       if(!db)throw new Error('페르소나를 읽을 DB 권한이 없습니다. 권한을 허용하거나 페르소나 포함을 해제하세요.');
       const personas=db.personas||[];
       const persona=personas.find(p=>p.id&&p.id===chat.bindedPersona)||personas[Number(db.selectedPersona)];
-      context.persona=persona?{name:persona.name,description:persona.personaPrompt||''}:null;
+      context.persona=persona?{name:persona.name,description:await parseText(persona.personaPrompt||'','페르소나 설명')}:null;
     }
-    context.lorebooks=state.lores.filter(x=>draft.selected.has(x.ref)).map(x=>({title:x.entry.comment||'',content:x.entry.content||''}));
+    context.lorebooks=[];
+    for(const lore of state.lores.filter(x=>draft.selected.has(x.ref))) {
+      const title=lore.entry.comment||'';
+      const content=await parseText(lore.entry.content||'','로어북 “'+(title||'이름 없음')+'”');
+      if(content.trim())context.lorebooks.push({title,content});
+    }
     await freshToolTarget(state.target);
     return context;
   }
@@ -1480,7 +1535,10 @@
       if(kind==='keys') {
         jobs=keyJobs(state);if(!jobs.length)throw new Error('번역할 기본 활성화키가 있는 로어북을 선택하세요.');
         context={keys:jobs.map(({id,key})=>({id,key}))};
-      }else context=await collectToolContext(state,draft);
+      }else {
+        notice(draft.parseCBS!==false?'현재 채팅의 CBS 조건으로 입력 자료를 준비하는 중…':'CBS 파싱 없이 입력 자료를 준비하는 중…');
+        context=await collectToolContext(state,draft);
+      }
       const messages=buildToolMessages(kind,context,getToolPrompt(kind),keyTargetLanguage);
       notice('번역 보조모델로 '+TOOL_NAMES[kind]+' 생성 중… 입력 약 '+estimateTokens(JSON.stringify(messages)).toLocaleString()+' 토큰 (추정)');
       const text=await runToolRequest(messages);
@@ -1553,17 +1611,18 @@
     const summary=el('summary'),list=el('div',{className:'tool-lore-list'}),search=el('input',{type:'search',placeholder:'로어북 이름 · 본문 검색',ariaLabel:'도구 로어북 검색'});
     const selectable=x=>kind!=='keys'||(!x.entry.useRegex&&splitLoreKeys(x.entry.key).length>0);
     const visible=()=>state.lores.filter(x=>[x.entry.comment,x.entry.content,x.entry.key,x.label].join('\n').toLocaleLowerCase().includes(search.value.toLocaleLowerCase()));
+    const openLores=new Set();
     function renderList() {
       list.replaceChildren();const selected=state.lores.filter(x=>draft.selected.has(x.ref));
-      summary.textContent='로어북 선택 · '+selected.length+' / '+state.lores.length+'개 · 선택 본문 약 '+estimateTokens(selected.map(x=>x.entry.content||'').join('\n')).toLocaleString()+' 토큰';
+      summary.textContent='로어북 선택 · '+selected.length+' / '+state.lores.length+'개 · 선택 원문 약 '+estimateTokens(selected.map(x=>x.entry.content||'').join('\n')).toLocaleString()+' 토큰';
       for(const item of visible()) {
         const title=item.entry.comment||'이름 없는 로어북';
         const row=el('div',{className:'tool-lore-row'}),check=el('input',{type:'checkbox',checked:draft.selected.has(item.ref),disabled:!selectable(item),ariaLabel:title+' 선택'});
         check.addEventListener('change',()=>{if(check.checked)draft.selected.add(item.ref);else draft.selected.delete(item.ref);renderList();});
-        const preview=el('details');
-        preview.append(
-          el('summary',{},[el('span',{className:'tool-lore-name',textContent:title}),el('span',{className:'tool-lore-meta',textContent:' · '+item.label+(item.entry.useRegex?' · 정규식':'')})]),
-          el('pre',{textContent:'기본 키: '+(item.entry.key||'(없음)')+'\n\n'+(item.entry.content||'')}));
+        const preview=toolLorePreview(state,item,kind!=='keys'&&draft.parseCBS!==false,open=>{
+          if(open)openLores.add(item.ref);else openLores.delete(item.ref);
+        });
+        preview.open=openLores.has(item.ref);
         row.append(check,preview);list.append(row);
       }
       if(!list.childNodes.length)list.append(el('p',{className:'small tool-empty',textContent:state.loaded?'표시할 로어북이 없습니다.':'로어북을 불러오는 중…'}));
@@ -1574,7 +1633,13 @@
       button('검색 결과 선택',()=>{visible().filter(selectable).forEach(x=>draft.selected.add(x.ref));renderList();}),
       button('선택 해제',()=>{draft.selected.clear();renderList();})]);
     loreBox.append(summary,el('div',{className:'tool-lores-body'},[search,loreActions,list]));renderList();
-    const loreSection=toolSection([loreBox,el('p',{className:'tool-hint',textContent:''})]);
+    const loreSection=toolSection([]);
+    if(kind!=='keys') {
+      const cbsToggle=toolCheck('CBS 파싱 적용',draft.parseCBS!==false,value=>{draft.parseCBS=value;renderList();});
+      cbsToggle.querySelector('input').id='tool-parse-cbs';
+      loreSection.append(cbsToggle,el('p',{className:'tool-hint',textContent:'미리보기와 모델 입력에 함께 적용합니다. 해제하면 언어별 분기를 포함한 원문 전체를 사용합니다.'}));
+    }
+    loreSection.append(loreBox);
     if(state.warning)loreSection.append(el('p',{className:'notice warn',textContent:state.warning}));
     loreSection.append(el('p',{className:'tool-callout',textContent:kind==='keys'?'기본 활성화키만 번역합니다. 정규식·폴더·연결 항목은 제외하며, 보조키는 변경하지 않습니다. 모듈 키 수정은 같은 모듈을 사용하는 다른 채팅에도 반영됩니다.':'선택한 항목만 모델에 전달합니다. 캐릭터·현재 채팅·활성 모듈의 로어북을 표시하며 처음에는 모두 선택 해제되어 있습니다.'}));
     settingsBody.append(loreSection);
@@ -1683,5 +1748,5 @@
     for(const part of registrations)await R.unregisterUIPart(typeof part==='string'?part:part.id);
   });
   watchTimer=setTimeout(watch,2000);
-  console.log('[GigaTrans Utility] v1.7.3 준비 완료');
+  console.log('[GigaTrans Utility] v1.7.6 준비 완료');
 })().catch(e=>console.error('[GigaTrans Utility] 초기화 실패:',e.message));
