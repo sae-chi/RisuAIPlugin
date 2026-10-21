@@ -1,7 +1,7 @@
 //@name hypa-manager
 //@display-name Hypa Manager
 //@api 3.0
-//@version 1.12.4
+//@version 1.12.5
 //@arg summary_prompt string Default summary prompt
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/hypa-manager.js
 
@@ -288,6 +288,63 @@
       ]
     }
 
+    // Keep the source and its numbering intact; all consumers share one CBS snapshot.
+    function firstMessageContextStamp(char, chat) {
+      return JSON.stringify([
+        char.chaId, char.chatPage, chat.id, chat.fmIndex,
+        getCurrentFirstMessage(char, chat), messageStamp(chat),
+        chat.scriptstate, chat.GLGlobalVariables,
+        char.defaultVariables, char.name, char.nickname
+      ])
+    }
+
+    async function prepareFirstMessage(messages, char, chat) {
+      const first = messages.find(message => message.isFirstMessage)
+      if (!first) return
+      first.cbsContext = firstMessageContextStamp(char, chat)
+      try {
+        if (typeof Risuai.parseRisuChat !== 'function') throw new Error('CBS 파서 API를 지원하는 RisuAI로 업데이트하세요.')
+        const assertActive = async () => {
+          const live = await Risuai.getCharacter()
+          const activeChat = live?.chats?.[live.chatPage]
+          if (unloaded || !activeChat || firstMessageContextStamp(live, activeChat) !== first.cbsContext) {
+            throw new Error('대상 채팅 또는 첫 메시지의 조건이 변경되었습니다. 창을 다시 여세요.')
+          }
+        }
+        await assertActive()
+        const parsed = await Risuai.parseRisuChat(first.data, {
+          messageIndex: -1,
+          role: 'assistant',
+          cbsConditions: { firstmsg: true, chatRole: 'assistant' },
+          runVar: false,
+          rmVar: true,
+          processRegex: false
+        })
+        if (typeof parsed !== 'string') throw new Error('CBS 파서가 텍스트를 반환하지 않았습니다. RisuAI 버전을 확인하세요.')
+        await assertActive()
+        first.parsedText = parsed
+      } catch (error) {
+        first.cbsError = '첫 메시지 CBS 해석 실패: ' + (error?.message || String(error))
+        console.warn('[Hypa Manager]', first.cbsError)
+      }
+    }
+
+    function getMessageText(message) {
+      if (message.isFirstMessage) {
+        if (message.cbsError) throw new Error(message.cbsError)
+        if (typeof message.parsedText !== 'string') throw new Error('첫 메시지 CBS 해석이 필요합니다. 창을 다시 여세요.')
+        return message.parsedText
+      }
+      return String(typeof message.data === 'string' ? message.data : (message.data?.[0] ?? ''))
+    }
+
+    function assertFirstMessageContext(messages, char, chat) {
+      const first = messages.find(message => message.isFirstMessage)
+      if (first && first.cbsContext !== firstMessageContextStamp(char, chat)) {
+        throw new Error('첫 메시지 또는 채팅 변수가 변경되었습니다. 창을 다시 열어 CBS를 갱신하세요.')
+      }
+    }
+
     async function getConfig() {
       await promptSaveQueue
       const savedPrompt = (await Risuai.getArgument('summary_prompt') ?? '').trim()
@@ -353,10 +410,10 @@
         .filter(m => m && m.role !== 'system')
         .map(m => {
           const role = m.isFirstMessage ? '첫 메시지' : (m.role === 'user' ? '사용자' : (m.name ?? '캐릭터'))
-          const rawText = typeof m.data === 'string' ? m.data : (m.data?.[0] ?? '')
-          const text = extractGigaTransSource(String(rawText))
-          return '[' + role + ']: ' + text
+          const text = extractGigaTransSource(getMessageText(m))
+          return text.trim() ? '[' + role + ']: ' + text : ''
         })
+        .filter(Boolean)
         .join('\n')
     }
 
@@ -399,7 +456,7 @@
     }
 
     function eventIndexesMatch(source, current, indexes) {
-      const stamp = message => JSON.stringify([message.chatId, message.role, message.data, !!message.isFirstMessage])
+      const stamp = message => JSON.stringify([message.chatId, message.role, message.data, !!message.isFirstMessage, message.parsedText, message.cbsContext, message.cbsError])
       return indexes.every(index => source[index] && current[index] && stamp(source[index]) === stamp(current[index]))
     }
 
@@ -453,11 +510,13 @@
       if (!prompt.trim()) throw new Error('사건 선별 프롬프트를 입력하세요.')
       const limit = entries.length
       const protocol = '\n\n제공된 메시지만 분석하고 마지막 번호까지 모두 구간에 포함하세요. 진행 중인 사건도 제공된 범위 안에서 나누고 보류하지 마세요.\n출력 규칙: 사건 이름이나 요약문 없이 JSON만 반환하세요. 형식은 {"events":[{"start":1,"end":3}],"deferredFrom":4}입니다. 첫 번호 1부터 마지막 번호 ' + limit + '까지 빠짐없이 연속된 구간이어야 합니다. deferredFrom은 마지막 end+1인 ' + (limit + 1) + '입니다.'
-      const input = JSON.stringify({ messages: entries.map(({ message: m }, i) => ({
+      const eventMessages = entries.map(({ message: m }, i) => ({
         number: i + 1,
         role: m.role,
-        text: extractGigaTransSource(String(typeof m.data === 'string' ? m.data : (m.data?.[0] ?? '')))
-      })) })
+        text: extractGigaTransSource(getMessageText(m))
+      }))
+      if (!eventMessages.some(message => message.text.trim())) throw new Error('선택한 구간에 선별할 내용이 없습니다.')
+      const input = JSON.stringify({ messages: eventMessages })
       const plan = validateEventPlan(await callMemoryModel(cfg, prompt + protocol, input), limit)
       return plan.map(event => ({ indexes: entries.slice(event.start - 1, event.end).map(entry => entry.index) }))
     }
@@ -621,8 +680,9 @@
       if (!target) throw new Error('요약 대상 정보가 없습니다. 다시 요약하세요.')
       manualBusy = true
       try {
-        const { charIndex, chatIndex, chat } = await resolveOwner(target.owner)
+        const { char, charIndex, chatIndex, chat } = await resolveOwner(target.owner)
         if (messageStamp(chat) !== target.messages || memoryStamp(chat) !== target.memory) throw new Error('요약 이후 대화나 기억이 변경되었습니다. 다시 확인하세요.')
+        if (target.firstMessageContext && firstMessageContextStamp(char, chat) !== target.firstMessageContext) throw new Error('요약 이후 첫 메시지의 조건이 변경되었습니다. 다시 요약하세요.')
         const existing = chat.hypaV3Data ?? { summaries: [] }
         if (!Array.isArray(existing.summaries)) existing.summaries = []
         existing.summaries.push({ text: summaryText, chatMemos, isImportant: false, tags: [] })
@@ -1003,7 +1063,7 @@
             const isSystem = m.role === 'system'
             const isUser = m.role === 'user'
             const role = m.isFirstMessage ? '첫 메시지' : (isSystem ? '시스템' : (isUser ? '사용자' : (m.name ?? '캐릭터')))
-            const text = typeof m.data === 'string' ? m.data : (m.data?.[0] ?? '')
+            const text = m.cbsError || getMessageText(m)
             const cls = isSystem ? 'msg-role-system' : (isUser ? 'msg-role-user' : 'msg-role-char')
             const disabled = isSystem ? ' disabled' : ''
             return '<div class="msg-row' + (m.isFirstMessage ? ' first-message' : '') + '" data-idx="' + i + '" tabindex="0" aria-haspopup="dialog" title="클릭해서 전문 보기">' +
@@ -1297,6 +1357,7 @@
         if (unloaded || !eventPanel.isConnected || live.char.chaId !== char.chaId || live.chat.id !== viewedChat?.id || messageStamp(live.chat) !== viewedMessages || getCurrentFirstMessage(live.char, live.chat) !== viewedGreeting) {
           throw new Error('대상 대화가 변경되었습니다. 창을 다시 열고 사건을 선별하세요.')
         }
+        assertFirstMessageContext(messages, live.char, live.chat)
         return live
       }
       async function persistEventPrompt() {
@@ -1346,6 +1407,7 @@
           if (unloaded || messageStamp(live.chat) !== viewedMessages || getCurrentFirstMessage(live.char, live.chat) !== viewedGreeting) {
             throw new Error('대상 대화가 변경되었습니다. 창을 다시 열고 사건을 선별하세요.')
           }
+          assertFirstMessageContext(messages, live.char, live.chat)
           if (revision !== eventSession.revision) throw new Error('선별 조건이 변경되었습니다. 다시 선별하세요.')
           eventSession.result = { events, messages: structuredClone(messages), start, end }
           eventMessage('선별 완료. 사건별 원문을 확인하고 수동 요약에 적용하세요.')
@@ -1368,12 +1430,12 @@
         try {
           const number = Number(button.dataset.eventIndex) + 1
           if (button.dataset.eventAction === 'preview') {
-            document.getElementById('message-dialog-title').textContent = '사건 ' + number + ' · 선별 당시 원문 · 메시지 ' + selected.indexes[0] + '~' + selected.indexes.at(-1)
+            document.getElementById('message-dialog-title').textContent = '사건 ' + number + ' · 선별 당시 내용 · 메시지 ' + selected.indexes[0] + '~' + selected.indexes.at(-1)
             const content = document.getElementById('message-dialog-content')
             content.textContent = selected.indexes.map(index => {
               const message = result.messages[index]
               const role = message.isFirstMessage ? '첫 메시지' : message.role === 'user' ? '사용자' : (message.name ?? '캐릭터')
-              const text = typeof message.data === 'string' ? message.data : (message.data?.[0] ?? '')
+              const text = getMessageText(message)
               return '[#' + index + ' · ' + role + ']\n' + text
             }).join('\n\n')
             messageDialog.showModal()
@@ -1381,7 +1443,7 @@
           } else if (button.dataset.eventAction === 'apply') {
             await assertEventChat()
             if (eventSession.result !== result || !eventIndexesMatch(result.messages, messages, selected.indexes)) {
-              throw new Error('선별 당시 원문과 현재 메시지가 다릅니다. 기존 결과는 유지되며, 적용하려면 다시 선별하세요.')
+              throw new Error('선별 당시 내용과 현재 메시지가 다릅니다. 기존 결과는 유지되며, 적용하려면 다시 선별하세요.')
             }
             const indexes = new Set(selected.indexes)
             document.querySelectorAll('#tab-summarize .msg-check').forEach(input => {
@@ -1432,11 +1494,6 @@
           return
         }
         const systemPrompt = document.getElementById('prompt-input')?.value?.trim() || cfg.prompt || ''
-        const userContent = formatSelectedForSummary(messages, selectedIndexes)
-        if (!userContent.trim()) {
-          showMsg('msg', '선택한 채팅에 요약할 내용이 없습니다.', true)
-          return
-        }
         manualBusy = true
         setLoading(true)
         showMsg('msg', '', false)
@@ -1445,7 +1502,14 @@
         try {
           const live = await getCharacterContext()
           if (live.char.chaId !== char.chaId || live.chat.id !== char.chats?.[char.chatPage]?.id || messageStamp(live.chat) !== messageStamp(char.chats?.[char.chatPage] ?? {})) throw new Error('대상 채팅이 변경되었습니다. 창을 다시 여세요.')
-          lastSummaryTarget = { owner: ownerOf(live.char, live.chat, live.chatIndex), messages: messageStamp(live.chat), memory: memoryStamp(live.chat) }
+          const selectedMessages = selectedIndexes.map(index => messages[index]).filter(Boolean)
+          assertFirstMessageContext(selectedMessages, live.char, live.chat)
+          const userContent = formatSelectedForSummary(messages, selectedIndexes)
+          if (!userContent.trim()) throw new Error('선택한 채팅에 요약할 내용이 없습니다.')
+          lastSummaryTarget = {
+            owner: ownerOf(live.char, live.chat, live.chatIndex), messages: messageStamp(live.chat), memory: memoryStamp(live.chat),
+            firstMessageContext: selectedMessages.find(m => m.isFirstMessage)?.cbsContext
+          }
           const result = await callMemoryModel(cfg, systemPrompt, userContent)
           lastSummary = result
           lastSummaryChatMemos = getChatMemoIds(messages, selectedIndexes)
@@ -1666,6 +1730,7 @@
           getSlotList(charId),
           loadEventPrompt()
         ])
+        await prepareFirstMessage(messages, char, chat)
         buildUI(messages, cfg, presets, slots, char, eventPrompt)
         bindUI(messages, cfg, presets, char, chatIndex)
         await Risuai.showContainer('fullscreen')
@@ -1674,7 +1739,7 @@
     )
 
     await pollNewChats()
-    console.log('[Hypa Manager] Plugin loaded v1.12.4')
+    console.log('[Hypa Manager] Plugin loaded v1.12.5')
   } catch (error) {
     console.log('[Hypa Manager] Error: ' + error.message)
   }
