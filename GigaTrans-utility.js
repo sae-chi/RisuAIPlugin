@@ -1,7 +1,7 @@
 //@name gigatrans_utility
 //@display-name GigaTrans Utility
 //@api 3.0
-//@version 1.7.6
+//@version 1.7.7
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/GigaTrans-utility.js
 
 ;(async function () {
@@ -969,10 +969,14 @@
     const shell=layout(),bar=$('view-toolbar'),sel=el('select',{id:'messages','ariaLabel':'메시지 선택'});
     $('sidebar-controls').append(el('p',{className:'small',textContent:(target.char.name||'캐릭터')+' / '+(target.chat.name||'채팅')}));
     const indices=[];
-    target.chat.message.forEach((m,i)=>{
-      if(m.role!=='char')return;indices.push(i);
-      sel.append(el('option',{value:String(i),textContent:'#'+(i+1)}));
-    });
+    function updateMessageList(chat) {
+      indices.length=0;sel.replaceChildren();
+      chat.message.forEach((m,i)=>{
+        if(m.role!=='char')return;indices.push(i);
+        sel.append(el('option',{value:String(i),textContent:'#'+(i+1)}));
+      });
+    }
+    updateMessageList(target.chat);
     const move=async delta=>{if(!canLeave())return;const pos=indices.indexOf(Number(sel.value));const next=indices[pos+delta];if(next!==undefined)await openViewer(next,$('search-query')?.value||'');};
     $('sidebar-controls').append(sel);
     bar.prepend(button('← 이전',()=>move(-1)),button('다음 →',()=>move(1)),button('새로고침',async()=>{if(canLeave())await openViewer(Number(sel.value));}));
@@ -1027,8 +1031,11 @@
     }
     updateSyncToggle();
     $('sidebar-controls').append(syncToggle);
-    const advanced=el('details'),sumEl=el('summary',{textContent:'보호 데이터'});
-    advanced.append(sumEl,el('p',{className:'small',textContent:pair.paired?'앞부분과 뒷부분을 편집한 뒤 변경 저장을 누르세요. 메모·상태 태그를 포함해 입력하며, GigaTrans 제어 태그는 자동으로 유지합니다.':'번역되지 않은 메시지는 보호 영역을 구별할 수 없습니다. 원문에서 편집하세요.'}));
+    const advanced=el('details'),sumEl=el('summary',{textContent:'보호 데이터'}),protectedHint=el('p',{className:'small'});
+    function updateProtectedHint() {
+      protectedHint.textContent=pair.paired?'앞부분과 뒷부분을 편집한 뒤 변경 저장을 누르세요. 메모·상태 태그를 포함해 입력하며, GigaTrans 제어 태그는 자동으로 유지합니다.':'번역되지 않은 메시지는 보호 영역을 구별할 수 없습니다. 원문에서 편집하세요.';
+    }
+    updateProtectedHint();advanced.append(sumEl,protectedHint);
     const protectedCols=el('div',{className:'cols'}),pv=protectedValues(pair);
     for(const [key,title] of [['head','앞부분'],['tail','뒷부분']]) {
       const card=el('section',{className:'card'});
@@ -1041,6 +1048,27 @@
     const actions=el('div',{className:'actions'});
     actions.append(button('변경 저장',saveEditors,true));
     shell.append(advanced,actions);
+    const viewer=view;
+    viewer.refreshAfterSave=({chat,index})=>{
+      pair=splitMessage(chat.message[index].data||'');
+      viewer.pair=pair;viewer.snap=snapshot(chat,index);target.chat=chat;
+      updateMessageList(chat);sel.value=String(index);
+      const pv=protectedValues(pair);
+      let changed=false;
+      // Keep the existing DOM, scroll positions, selection and undo history on save.
+      // Only normalize fields whose saved representation actually differs.
+      for(const [id,value]of [['original',pair.original],['translation',pair.translation],['protected-head',pv.head],['protected-tail',pv.tail]]) {
+        const input=$(id);
+        if(input.value===value)continue;
+        const {scrollTop,scrollLeft,selectionStart,selectionEnd,selectionDirection}=input;
+        input.value=value;
+        input.setSelectionRange(selectionStart,selectionEnd,selectionDirection);
+        input.scrollTop=scrollTop;input.scrollLeft=scrollLeft;
+        changed=true;
+      }
+      updateProtectedHint();
+      if(changed)updateSearch();
+    };
     notice(pair.legacy?'이전 Relay 형식: 알려진 보호 태그를 분리했습니다. 사용자 정의 앞부분은 번역문에 포함될 수 있습니다.':pair.paired?'':'아직 번역되지 않은 메시지입니다.');
     await R.showContainer('fullscreen');
   }
@@ -1720,7 +1748,7 @@
     const v=view,original=$('original').value,translation=$('translation').value;
     const raw=replaceAllAreas(v.pair,original,translation,$('protected-head').value,$('protected-tail').value);
     uiBusy=true;busy(true);
-    try{const saved=await saveDraft(v.target,v.snap,raw);await openViewer(saved.index);notice('채팅에 저장했습니다.');}
+    try{const saved=await saveDraft(v.target,v.snap,raw);v.refreshAfterSave(saved);notice('채팅에 저장했습니다.');}
     finally{uiBusy=false;busy(false);if(view&&!view.pair.paired){$('protected-head').disabled=true;$('protected-tail').disabled=true;}}
   }
   async function watch() {
@@ -1748,5 +1776,5 @@
     for(const part of registrations)await R.unregisterUIPart(typeof part==='string'?part:part.id);
   });
   watchTimer=setTimeout(watch,2000);
-  console.log('[GigaTrans Utility] v1.7.6 준비 완료');
+  console.log('[GigaTrans Utility] v1.7.7 준비 완료');
 })().catch(e=>console.error('[GigaTrans Utility] 초기화 실패:',e.message));
