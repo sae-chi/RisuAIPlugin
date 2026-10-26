@@ -1,7 +1,7 @@
 //@name chat_find_replace
 //@display-name 채팅 찾기/바꾸기
 //@api 3.0
-//@version 1.3.0
+//@version 1.3.1
 //@update-url https://raw.githubusercontent.com/sae-chi/RisuAIPlugin/refs/heads/main/chat-find-replace.js
 
 (async () => {
@@ -585,6 +585,8 @@
       caseSensitive: document.getElementById("caseSensitive").checked,
       includeUser: document.getElementById("includeUser").checked,
       includeAssistant: document.getElementById("includeAssistant").checked,
+      autoCorrectParticles: document.getElementById("autoCorrectParticles")?.checked || false,
+      isNameMode: document.getElementById("isNameMode")?.checked || false,
     };
   }
 
@@ -829,6 +831,187 @@
     }, searchDebounceMs);
   }
 
+  /**
+   * 찾아 바꾸기 실행 후, 한국어 조사 및 서술격/인명 접미사를 알맞게 교정하는 함수
+   * @param {string} text - 찾아 바꾸기가 1차로 완료된 전체 텍스트
+   * @param {string} replacedWord - 새롭게 치환된 단어
+   * @param {object} options - 옵션 객체 (isNameMode 포함)
+   * @returns {string} 조사가 알맞게 교정된 텍스트
+   */
+  function postProcessKoreanParticles(text, replacedWord, options) {
+    if (!replacedWord || typeof replacedWord !== "string" || replacedWord.length === 0) return text;
+
+    const isNameMode = options?.isNameMode !== false; // 기본값 true
+
+    const lastChar = replacedWord.charCodeAt(replacedWord.length - 1);
+    
+    // 바뀐 단어의 마지막 글자가 한글(가~힣)이 아니면(예: 영어, 숫자) 종성을 판별할 수 없으므로 건너뜁니다.
+    if (lastChar < 0xac00 || lastChar > 0xd7a3) {
+      return text;
+    }
+
+    const jongseong = (lastChar - 0xac00) % 28;
+    const hasJongseong = jongseong > 0;
+    const isRieul = jongseong === 8;
+
+    // 🚨 중요: 긴 조사가 먼저 매칭되도록 글자 수(length) 내림차순 정렬
+    // 누락되었던 조사(이야, 이니, 이란, 이라고, 이와 등) 모두 추가됨
+    const particles = [
+      "이라지만", "이더냐", "이든지", "이시여", "이든가", "이나마", "이라도",
+      "이라고", "이에요", "이라서", "이한테", "이에게", "이어서",
+      "이다", "이고", "이면", "이네", "이며", "이랑", "이나", "이가", "이는", "이를", "이었", "이던", "이야", "이니", "이란", "이와", "이셔",
+      "라지만", "더냐", "든지", "시여", "든가", "나마", "라도",
+      "예요", "라서", "으로", "한테", "에게", "여서", "라고",
+      "은", "는", "이", "가", "을", "를", "과", "와", "로", "아", "야", "였", "던", "셔",
+      "다", "고", "면", "네", "며", "랑", "나", "니", "란"
+    ].sort((a, b) => b.length - a.length);
+
+    // 사용자가 입력한 단어에 정규식 특수문자가 있을 경우를 대비한 이스케이프 처리
+    const escapedWord = replacedWord.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    
+    // 닫는 따옴표/괄호(" ' ] ) } 등)가 단어와 조사 사이에 끼어있는 경우를 캡처하기 위한 그룹 ([...]) 추가
+    const regex = new RegExp(escapedWord + "([\"'”’\\]\\)\\}]*)(" + particles.join("|") + ")", "g");
+
+    return text.replace(regex, (match, punc, particle) => {
+      let correctParticle = particle;
+
+      if (hasJongseong) {
+        // [A] 받침이 있는 단어로 바뀌었을 때 (예: 코트 -> 경기장, 철수 -> 지민)
+        switch (particle) {
+          case "는": correctParticle = "은"; break;
+          case "가": correctParticle = "이"; break;
+          case "를": correctParticle = "을"; break;
+          case "와": correctParticle = "과"; break;
+          case "야": correctParticle = isNameMode ? "아" : "이야"; break; // 인명: 호격(아), 사물: 서술격(이야)
+          case "예요": correctParticle = "이에요"; break;
+          case "였": correctParticle = "이었"; break;
+          case "여서": correctParticle = "이어서"; break;
+          case "던": correctParticle = "이던"; break;
+          case "다": correctParticle = "이다"; break;
+          case "고": correctParticle = "이고"; break;
+          case "면": correctParticle = "이면"; break;
+          case "라서": correctParticle = "이라서"; break;
+          case "네": correctParticle = "이네"; break;
+          case "며": correctParticle = "이며"; break;
+          case "랑": correctParticle = "이랑"; break;
+          case "나": correctParticle = "이나"; break;
+          case "니": correctParticle = "이니"; break;
+          case "란": correctParticle = "이란"; break;
+          case "라고": correctParticle = "이라고"; break;
+          
+          case "라지만": correctParticle = "이라지만"; break;
+          case "더냐": correctParticle = "이더냐"; break;
+          case "든지": correctParticle = "이든지"; break;
+          case "시여": correctParticle = "이시여"; break;
+          case "든가": correctParticle = "이든가"; break;
+          case "나마": correctParticle = "이나마"; break;
+          case "라도": correctParticle = "이라도"; break;
+          case "셔": correctParticle = "이셔"; break;
+
+          case "으로":
+          case "로":
+            correctParticle = isRieul ? "로" : "으로";
+            break;
+        }
+      } else {
+        // [B] 받침이 없는 단어로 바뀌었을 때 (예: 경기장 -> 코트, 지민 -> 철수)
+        switch (particle) {
+          case "은": correctParticle = "는"; break;
+          case "을": correctParticle = "를"; break;
+          case "과": correctParticle = "와"; break;
+          case "아": correctParticle = "야"; break; // 서술격 '야'로 변환 (코트야)
+          case "이에요": correctParticle = "예요"; break;
+          case "으로": correctParticle = "로"; break;
+          case "이었": correctParticle = "였"; break;
+          case "이어서": correctParticle = "여서"; break;
+          case "이던": correctParticle = "던"; break;
+          case "이다": correctParticle = "다"; break;
+          case "이고": correctParticle = "고"; break;
+          case "이면": correctParticle = "면"; break;
+          case "이라서": correctParticle = "라서"; break;
+          case "이네": correctParticle = "네"; break;
+          case "이며": correctParticle = "며"; break;
+          case "이랑": correctParticle = "랑"; break;
+          case "이나": correctParticle = "나"; break;
+          
+          case "이라지만": correctParticle = "라지만"; break;
+          case "이더냐": correctParticle = "더냐"; break;
+          case "이든지": correctParticle = "든지"; break;
+          case "이시여": correctParticle = "시여"; break;
+          case "이든가": correctParticle = "든가"; break;
+          case "이나마": correctParticle = "나마"; break;
+          case "이라도": correctParticle = "라도"; break;
+          case "이셔": correctParticle = "셔"; break;
+          
+          // 인명 접미사 파생형 (인명 모드일 때만 탈락시킴)
+          case "이가": correctParticle = isNameMode ? "가" : "이가"; break;
+          case "이는": correctParticle = isNameMode ? "는" : "이는"; break;
+          case "이를": correctParticle = isNameMode ? "를" : "이를"; break;
+          case "이한테": correctParticle = isNameMode ? "한테" : "이한테"; break;
+          case "이에게": correctParticle = isNameMode ? "에게" : "이에게"; break;
+          case "이와": correctParticle = isNameMode ? "와" : "이와"; break;
+          
+          // 서술격 조사 파생형 (사물에도 쓰이므로 항상 축약)
+          case "이야": correctParticle = "야"; break;
+          case "이니": correctParticle = "니"; break;
+          case "이란": correctParticle = "란"; break;
+          case "이라고": correctParticle = "라고"; break;
+          
+          case "이": correctParticle = "가"; break;
+        }
+      }
+
+      // 단어 + 따옴표/괄호 등 + 교정된 조사 형태로 반환
+      return replacedWord + punc + correctParticle;
+    });
+  }
+
+  // Match native replacement tokens while retaining each expanded word for particle correction.
+  function expandRegexReplacement(replacement, match, captures, offset, text, groups) {
+    return replacement.replace(/\$([$&`']|[0-9]{1,2}|<[^>]*>)/g, (token, key) => {
+      if (key === "$") return "$";
+      if (key === "&") return match;
+      if (key === "`") return text.slice(0, offset);
+      if (key === "'") return text.slice(offset + match.length);
+      if (key.startsWith("<")) {
+        return groups === undefined ? token : (groups[key.slice(1, -1)] ?? "");
+      }
+      const index = Number(key);
+      if (index > 0 && index <= captures.length) return captures[index - 1] ?? "";
+      const firstIndex = Number(key[0]);
+      if (key.length === 2 && firstIndex > 0 && firstIndex <= captures.length) {
+        return (captures[firstIndex - 1] ?? "") + key[1];
+      }
+      return token;
+    });
+  }
+
+  function replaceWithKoreanParticles(text, matcher, replacement, options) {
+    if (!options.autoCorrectParticles) {
+      return text.replace(matcher, options.useRegex ? replacement : () => replacement);
+    }
+
+    const replacedWords = new Set();
+    let nextText = text.replace(matcher, (...args) => {
+      let replacedWord = replacement;
+      if (options.useRegex) {
+        const groups = typeof args[args.length - 1] === "object" ? args.pop() : undefined;
+        const input = args.pop();
+        const offset = args.pop();
+        const match = args.shift();
+        replacedWord = expandRegexReplacement(replacement, match, args, offset, input, groups);
+      }
+      replacedWords.add(replacedWord);
+      return replacedWord;
+    });
+
+    // Preserve the personal edition's whole-message postprocessing for each actual replacement.
+    for (const replacedWord of replacedWords) {
+      nextText = postProcessKoreanParticles(nextText, replacedWord, options);
+    }
+    return nextText;
+  }
+
   async function replaceCurrent() {
     try {
       if (state.scope !== "current") return;
@@ -866,7 +1049,7 @@
       const matcher = buildMatcher(findText, options);
       // Keep the full input so lookarounds and replacement context tokens work.
       const firstMatcher = new RegExp(matcher.source, matcher.flags.replace("g", ""));
-      const nextText = textRef.value.replace(firstMatcher, options.useRegex ? replaceText : () => replaceText);
+      const nextText = replaceWithKoreanParticles(textRef.value, firstMatcher, replaceText, options);
       if (textRef.key === null) nextMessages[match.messageIndex] = nextText;
       else nextMessage[textRef.key] = nextText;
 
@@ -922,7 +1105,7 @@
         changedMessages += 1;
         matcher.lastIndex = 0;
 
-        const nextText = textRef.value.replace(matcher, options.useRegex ? replaceText : () => replaceText);
+        const nextText = replaceWithKoreanParticles(textRef.value, matcher, replaceText, options);
         if (textRef.key === null) nextMessages[messageIndex] = nextText;
         else message[textRef.key] = nextText;
       });
@@ -1254,6 +1437,8 @@
               <button id="recentPreviewBtn">최근 20개 보기</button>
             </div>
             <div class="checks panelSection">
+              <label class="check currentOnly" title="바꾸기 후 잘못된 조사를 알맞게 자동 변경합니다."><input id="autoCorrectParticles" type="checkbox" /> 조사 자동 변경</label>
+              <label class="check currentOnly" title="조사 변경 시 '호격(아/야)'과 '인명 접미사(-이)'를 처리합니다. 사물을 바꿀 때는 끄는 것이 좋습니다."><input id="isNameMode" type="checkbox" /> 인명 모드</label>
               <label class="check"><input id="useRegex" type="checkbox" /> 정규식 사용</label>
               <label class="check"><input id="caseSensitive" type="checkbox" /> 대소문자 구분</label>
               <label class="check"><input id="includeUser" type="checkbox" checked /> 사용자</label>
